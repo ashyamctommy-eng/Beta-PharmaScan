@@ -112,31 +112,38 @@
     /* ── Markdown output styling ── */
     .markdown-body { font-size: 0.9rem; line-height: 1.7; color: #334155; }
     .markdown-body h1, .markdown-body h2 { font-size: 1.1rem; font-weight: 700; color: #0f766e; margin: 1.2rem 0 .5rem; padding-bottom: .3rem; border-bottom: 1px solid #ccfbf1; }
-    .markdown-body h3 { font-size: 1rem; font-weight: 600; color: #115e59; margin: 1rem 0 .4rem; }
-    .markdown-body h4 { font-size: .9rem; font-weight: 600; color: #1e3a5f; margin: .8rem 0 .3rem; }
+    /* h3 = question/section prompt → deep teal-blue */
+    .markdown-body h3 { font-size: 1rem; font-weight: 700; color: #0e7490; margin: 1rem 0 .4rem; }
+    /* h4 = sub-question / concept label → deep blue */
+    .markdown-body h4 { font-size: .9rem; font-weight: 700; color: #0369a1; margin: .8rem 0 .3rem; }
     .markdown-body p { margin: .5rem 0; }
     .markdown-body ul, .markdown-body ol { padding-left: 1.4rem; margin: .4rem 0; }
     .markdown-body li { margin: .2rem 0; }
     .markdown-body strong { color: #0f2744; font-weight: 700; }
     .markdown-body em { color: #0f766e; }
+    /* Inline code / formulas → blue panel */
     .markdown-body code {
-      background: #f1f5f9; border: 1px solid #e2e8f0;
+      background: #eff6ff; border: 1px solid #bfdbfe;
       border-radius: 4px; padding: .1rem .35rem;
-      font-size: .82rem; font-family: 'Courier New', monospace; color: #1e3a5f;
+      font-size: .82rem; font-family: 'Courier New', monospace; color: #0369a1; font-weight: 600;
     }
+    /* Code / formula block → dark panel with teal left-accent */
     .markdown-body pre {
-      background: #0f2744; color: #e2e8f0;
+      background: #0f172a; color: #e2e8f0;
       border-radius: 8px; padding: 1rem;
       overflow-x: auto; margin: .8rem 0;
+      border-left: 4px solid #0e7490;
     }
-    .markdown-body pre code { background: none; border: none; color: inherit; padding: 0; }
+    .markdown-body pre code { background: none; border: none; color: #7dd3fc; padding: 0; font-weight: 400; }
+    /* Blockquote = Key clinical notes → green tint */
     .markdown-body blockquote {
-      border-left: 4px solid #0d9488;
-      background: #f0fdfa;
+      border-left: 4px solid #15803d;
+      background: #f0fdf4;
       padding: .6rem 1rem;
       margin: .8rem 0;
       border-radius: 0 8px 8px 0;
-      color: #134e4a;
+      color: #15803d;
+      font-weight: 500;
     }
     .markdown-body blockquote p { margin: .2rem 0; }
     .markdown-body table { width: 100%; border-collapse: collapse; margin: .8rem 0; font-size: .85rem; }
@@ -171,6 +178,22 @@
     /* Analysis loading pulse */
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
     .pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+    /* ── Saved analysis cards ── */
+    .saved-note-card { border-color: #99f6e4; }
+    .saved-note-card:hover { border-color: #0d9488; }
+
+    /* ── Subject selector arrow ── */
+    .subject-select-wrap { position: relative; }
+    .subject-select-wrap::after {
+      content: '▾';
+      position: absolute; right: .75rem; top: 50%;
+      transform: translateY(-50%);
+      color: #64748b; font-size: .75rem; pointer-events: none;
+    }
+
+    /* ── View modal body ── */
+    #view-modal-body { max-height: 70vh; overflow-y: auto; }
 
     /* Scrollbar thin */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -393,6 +416,26 @@
       <p class="text-slate-500 font-medium text-sm">No resources found</p>
       <p class="text-slate-400 text-xs">Try adjusting your search or upload your first resource above.</p>
     </div>
+
+    <!-- ── Saved AI Analyses (localStorage — survives redeployments) ── -->
+    <div id="saved-analyses-section" class="hidden mt-8">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 bg-emerald-50 rounded-lg flex items-center justify-center">
+            <svg class="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+          </div>
+          <h2 class="text-sm font-semibold text-slate-700">Saved AI Analyses</h2>
+          <span id="saved-count-badge" class="text-xs bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded-full"></span>
+          <span class="text-xs text-slate-400 italic">(device-local · survives redeployments)</span>
+        </div>
+        <div class="relative max-w-xs w-full">
+          <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0" /></svg>
+          <input id="saved-search" type="text" placeholder="Search saved analyses…"
+            class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:border-transparent transition" />
+        </div>
+      </div>
+      <div id="saved-cards-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </div>
   </div>
 
   <!-- ══════════════════════════════════════════════ -->
@@ -416,7 +459,28 @@
     <!-- Input panel -->
     <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
 
-      <!-- Text-Only Mode Toggle — prominently placed ABOVE the file zone -->
+      <!-- Subject / Unit Selector -->
+      <div class="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1.5">
+        <label for="subject-selector" class="block text-xs font-semibold text-slate-500 uppercase tracking-wide">
+          📘 Select Subject / Unit
+        </label>
+        <div class="subject-select-wrap">
+          <select id="subject-selector"
+            class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent appearance-none cursor-pointer transition">
+            <option value="">General Pharmacy / Mixed Mode</option>
+            <option value="Anatomy and Physiology">Anatomy and Physiology</option>
+            <option value="Pharmaceutical Chemistry">Pharmaceutical Chemistry (Organic &amp; Inorganic)</option>
+            <option value="Pharmaceutics">Pharmaceutics (Dispensing &amp; Compounding)</option>
+            <option value="Pharmacology and Therapeutics">Pharmacology and Therapeutics</option>
+            <option value="Pharmacognosy">Pharmacognosy</option>
+            <option value="Microbiology and Parasitology">Microbiology and Parasitology</option>
+            <option value="Clinical Pharmacy">Clinical Pharmacy</option>
+            <option value="Pharmacy Law and Ethics">Pharmacy Law and Ethics</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Text-Only Mode Toggle -->
       <div class="flex items-center justify-between p-3 bg-teal-50 rounded-xl border border-teal-100">
         <div>
           <p class="text-sm font-semibold text-teal-800">Text-Only Mode</p>
@@ -485,10 +549,16 @@
         </div>
         <div class="flex items-center gap-3">
           <span id="result-meta" class="text-xs text-slate-400"></span>
-          <button id="copy-result" class="text-xs text-teal-600 hover:text-teal-800 font-medium flex items-center gap-1 transition-colors">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-            Copy
-          </button>
+          <div class="flex items-center gap-2">
+            <button id="copy-result" class="text-xs text-teal-600 hover:text-teal-800 font-medium flex items-center gap-1 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+              Copy
+            </button>
+            <button id="save-analysis" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium flex items-center gap-1 transition-colors border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+              Save to Vault
+            </button>
+          </div>
         </div>
       </div>
       <div id="analysis-output" class="p-5 markdown-body"></div>
@@ -527,6 +597,27 @@
   <span id="toast-msg"></span>
 </div>
 
+<!-- View Saved Analysis Modal -->
+<div id="view-analysis-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col" style="max-height:88vh;">
+    <div class="border-b border-slate-100 px-5 py-3 flex items-center justify-between flex-shrink-0">
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="w-6 h-6 bg-teal-50 rounded flex items-center justify-center flex-shrink-0">
+          <svg class="w-3.5 h-3.5 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+        </div>
+        <h3 id="view-modal-title" class="text-sm font-semibold text-slate-700 truncate">Saved Analysis</h3>
+      </div>
+      <button id="close-view-modal" class="text-slate-400 hover:text-slate-600 transition-colors ml-3 flex-shrink-0">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+      </button>
+    </div>
+    <div id="view-modal-body" class="p-5 markdown-body overflow-y-auto flex-1"></div>
+    <div class="border-t border-slate-100 px-5 py-3 flex justify-end flex-shrink-0">
+      <button id="close-view-modal-btn" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Delete Confirm Modal -->
 <div id="confirm-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
   <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-4">
@@ -551,12 +642,14 @@
 (function () {
 
   /* ── State ────────────────────────────────────────── */
-  let allNotes       = [];
-  let activeSemester = 'ALL';
-  let searchQuery    = '';
+  let allNotes        = [];
+  let activeSemester  = 'ALL';
+  let searchQuery     = '';
   let pendingDeleteId = null;
-  let analysisFile   = null;
-  let rawAnalysis    = '';
+  let analysisFile    = null;
+  let rawAnalysis     = '';
+  let lastConcept     = '';
+  let selectedSubject = '';
 
   /* ── DOM refs ──────────────────────────────────────── */
   const $ = id => document.getElementById(id);
@@ -615,6 +708,7 @@
       $(`panel-${t}`).classList.toggle('hidden', t !== tab);
       $(`tab-${t}`).classList.toggle('active', t === tab);
     });
+    if (tab === 'vault') renderSavedCards();
   };
 
   /* ── Upload panel collapse ──────────────────────────── */
@@ -846,6 +940,11 @@
   textOnlyToggle.addEventListener('change', updateToggleState);
   updateToggleState();
 
+  /* ── Subject / Unit selector ─────────────────────── */
+  $('subject-selector').addEventListener('change', () => {
+    selectedSubject = $('subject-selector').value;
+  });
+
   /* ── Analysis file drop zone ────────────────────────── */
   function setAnalysisFile(file) {
     if (!file) return;
@@ -914,16 +1013,18 @@
     $('analysis-loading').classList.remove('hidden');
 
     try {
-      const payload = { prompt, file_data: fileData, file_name: fileName, text_only: textOnly };
+      const payload = { prompt, file_data: fileData, file_name: fileName, text_only: textOnly, subject: selectedSubject || null };
       const r = await fetch('/api/analyze', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(payload),
-});
-let d = {};
-try { d = await r.json(); } catch { /* non-JSON body (e.g. Railway 502/504 HTML) */ }
-if (!r.ok) { showToast(d.detail || `Analysis failed (HTTP ${r.status}).`, 'error'); return; }
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      let d = {};
+      try { d = await r.json(); } catch { /* non-JSON body (e.g. Railway 502/504 HTML) */ }
+      if (!r.ok) { showToast(d.detail || `Analysis failed (HTTP ${r.status}).`, 'error'); return; }
+
       rawAnalysis = d.analysis;
+      lastConcept = d.concept || '';
       const html = DOMPurify.sanitize(marked.parse(d.analysis), {
         ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
       });
@@ -952,8 +1053,128 @@ if (!r.ok) { showToast(d.detail || `Analysis failed (HTTP ${r.status}).`, 'error
     navigator.clipboard.writeText(rawAnalysis).then(() => showToast('Analysis copied to clipboard!', 'info'));
   });
 
+  /* ── Save Analysis to localStorage Vault ────────────── */
+  $('save-analysis').addEventListener('click', saveAnalysisToVault);
+
+  function saveAnalysisToVault() {
+    if (!rawAnalysis) { showToast('No analysis to save yet — run an analysis first.', 'info'); return; }
+    const saved = JSON.parse(localStorage.getItem('saved_pharma_notes') || '[]');
+    const title = ($('analysis-prompt').value.trim().slice(0, 90)) || 'Untitled Analysis';
+    const entry = {
+      id: Date.now(),
+      title,
+      subject: selectedSubject || 'General Pharmacy / Mixed Mode',
+      concept: lastConcept || '',
+      timestamp: new Date().toISOString(),
+      markdown: rawAnalysis,
+    };
+    saved.unshift(entry);
+    putSavedNotes(saved);
+    showToast('✅ Analysis saved to device vault!', 'success');
+    renderSavedCards();
+  }
+
+  /* ── Render Saved Cards ──────────────────────────────── */
+  function getSavedNotes() {
+    try { return JSON.parse(localStorage.getItem('saved_pharma_notes') || '[]'); }
+    catch { return []; }
+  }
+  function putSavedNotes(arr) {
+    try { localStorage.setItem('saved_pharma_notes', JSON.stringify(arr)); } catch { /* quota full */ }
+  }
+
+  function renderSavedCards() {
+    const saved = getSavedNotes();
+    const section = $('saved-analyses-section');
+    const grid    = $('saved-cards-grid');
+    const badge   = $('saved-count-badge');
+    const q       = ($('saved-search') ? $('saved-search').value : '').toLowerCase();
+
+    badge.textContent = `${saved.length} saved`;
+    section.classList.toggle('hidden', saved.length === 0);
+    if (!saved.length) { grid.innerHTML = ''; return; }
+
+    const filtered = saved.filter(s =>
+      !q || s.title.toLowerCase().includes(q) || s.subject.toLowerCase().includes(q) || (s.concept||'').toLowerCase().includes(q)
+    );
+    grid.innerHTML = '';
+
+    if (!filtered.length) {
+      grid.innerHTML = '<p class="text-slate-400 text-sm col-span-full text-center py-6">No saved analyses match your search.</p>';
+      return;
+    }
+
+    filtered.forEach((item, i) => {
+      const card = document.createElement('div');
+      card.className = 'card-enter saved-note-card bg-white rounded-2xl border border-teal-100 shadow-sm hover:shadow-md transition-all flex flex-col overflow-hidden';
+      card.style.animationDelay = `${i * 25}ms`;
+      card.innerHTML = `
+        <div class="p-4 flex-1 space-y-2">
+          <div class="flex items-start gap-2">
+            <div class="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+            </div>
+            <h3 class="text-slate-800 font-semibold text-sm leading-snug line-clamp-2 flex-1">${esc(item.title)}</h3>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <span class="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 border border-teal-100">${esc(item.subject)}</span>
+            ${item.concept ? `<span class="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100">${esc(item.concept)}</span>` : ''}
+          </div>
+          <p class="text-slate-400 text-xs">${fmtDate(item.timestamp)}</p>
+        </div>
+        <div class="border-t border-slate-100 px-4 py-2.5 flex items-center justify-between bg-slate-50/50">
+          <button class="view-saved-btn inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900 transition-colors" data-id="${item.id}">
+            <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+            View full analysis
+          </button>
+          <button class="delete-saved-btn inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-red-500 transition-colors" data-id="${item.id}">
+            <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+            Delete
+          </button>
+        </div>`;
+      grid.appendChild(card);
+    });
+
+    /* Wire view buttons */
+    document.querySelectorAll('.view-saved-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id  = parseInt(btn.dataset.id, 10);
+        const all = getSavedNotes();
+        const item = all.find(s => s.id === id);
+        if (!item) return;
+        $('view-modal-title').textContent = item.title;
+        $('view-modal-body').innerHTML = DOMPurify.sanitize(marked.parse(item.markdown), {
+          ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
+        });
+        $('view-analysis-modal').classList.remove('hidden');
+      });
+    });
+
+    /* Wire delete buttons */
+    document.querySelectorAll('.delete-saved-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id  = parseInt(btn.dataset.id, 10);
+        putSavedNotes(getSavedNotes().filter(s => s.id !== id));
+        showToast('Saved analysis removed.', 'success');
+        renderSavedCards();
+      });
+    });
+  }
+
+  /* ── Close View Analysis Modal ──────────────────────── */
+  ['close-view-modal','close-view-modal-btn'].forEach(id => {
+    $( id ).addEventListener('click', () => $('view-analysis-modal').classList.add('hidden'));
+  });
+  $('view-analysis-modal').addEventListener('click', e => {
+    if (e.target === $('view-analysis-modal')) $('view-analysis-modal').classList.add('hidden');
+  });
+
+  /* ── Saved search filter ─────────────────────────────── */
+  $('saved-search').addEventListener('input', renderSavedCards);
+
   /* ── Init ───────────────────────────────────────────── */
   Promise.all([loadNotes(), loadStats()]);
+  renderSavedCards();
 
 })();
 </script>
