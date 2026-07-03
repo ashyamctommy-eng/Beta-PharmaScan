@@ -317,7 +317,7 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         # Pure text-only pipeline — bypass file handling, route straight to text completion
         messages.append({"role": "user", "content": body.prompt})
 
-        try:
+    try:
         completion = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=messages,
@@ -339,6 +339,7 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         )
 
     raw = completion.choices[0].message.content or "No response generated."
+
     # Strip <think>…</think> reasoning blocks from DeepSeek-R1
     import re as _re
     analysis = _re.sub(r"<think>[\s\S]*?</think>", "", raw).strip()
