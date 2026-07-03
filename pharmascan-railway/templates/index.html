@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PharmaScanKE — D.Pharma Study Vault &amp; AI Analysis</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            pharma: {
+              50:  '#f0fdf4', 100: '#dcfce7', 200: '#bbf7d0',
+              300: '#86efac', 400: '#4ade80', 500: '#22c55e',
+              600: '#16a34a', 700: '#15803d', 800: '#166534', 900: '#14532d',
+            },
+            teal: {
+              50: '#f0fdfa',  100: '#ccfbf1', 200: '#99f6e4',
+              300: '#5eead4', 400: '#2dd4bf', 500: '#14b8a6',
+              600: '#0d9488', 700: '#0f766e', 800: '#115e59', 900: '#134e4a',
+            },
+            navy: {
+              800: '#1e3a5f', 900: '#0f2744',
+            }
+          },
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+        }
+      }
+    };
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- marked.js for Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <!-- DOMPurify for XSS sanitisation -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    /* ── Tab underline animation ── */
+    .tab-btn {
+      position: relative;
+      transition: color .2s;
+    }
+    .tab-btn::after {
+      content: '';
+      position: absolute;
+      bottom: -2px; left: 0; right: 0;
+      height: 3px;
+      background: #0d9488;
+      border-radius: 2px 2px 0 0;
+      transform: scaleX(0);
+      transition: transform .2s ease;
+    }
+    .tab-btn.active { color: #0d9488; font-weight: 600; }
+    .tab-btn.active::after { transform: scaleX(1); }
+
+    /* ── Drop-zone ── */
+    #drop-zone.drag-over, #analysis-drop-zone.drag-over {
+      border-color: #0d9488;
+      background-color: #f0fdfa;
+    }
+
+    /* ── Spinner ── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { animation: spin .8s linear infinite; }
+
+    /* ── Card entrance ── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .card-enter { animation: fadeUp .22s ease both; }
+
+    /* ── Toggle switch ── */
+    .toggle-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+    .toggle-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      width: 44px; height: 24px;
+      background: #d1d5db;
+      border-radius: 9999px;
+      transition: background .25s;
+      flex-shrink: 0;
+    }
+    .toggle-switch input:checked + .toggle-track { background: #0d9488; }
+    .toggle-thumb {
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 18px; height: 18px;
+      background: #fff;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,.2);
+      transition: transform .25s;
+      pointer-events: none;
+    }
+    .toggle-switch input:checked ~ .toggle-thumb { transform: translateX(20px); }
+
+    /* ── Semester pill ── */
+    .pill-active { background-color: #0d9488 !important; color: #fff !important; border-color: #0d9488 !important; }
+
+    /* ── Toast ── */
+    #toast { transition: opacity .3s ease, transform .3s ease; }
+    #toast.hidden { opacity: 0; transform: translateY(12px); pointer-events: none; }
+    #toast.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── Markdown output styling ── */
+    .markdown-body { font-size: 0.9rem; line-height: 1.7; color: #334155; }
+    .markdown-body h1, .markdown-body h2 { font-size: 1.1rem; font-weight: 700; color: #0f766e; margin: 1.2rem 0 .5rem; padding-bottom: .3rem; border-bottom: 1px solid #ccfbf1; }
+    .markdown-body h3 { font-size: 1rem; font-weight: 600; color: #115e59; margin: 1rem 0 .4rem; }
+    .markdown-body h4 { font-size: .9rem; font-weight: 600; color: #1e3a5f; margin: .8rem 0 .3rem; }
+    .markdown-body p { margin: .5rem 0; }
+    .markdown-body ul, .markdown-body ol { padding-left: 1.4rem; margin: .4rem 0; }
+    .markdown-body li { margin: .2rem 0; }
+    .markdown-body strong { color: #0f2744; font-weight: 700; }
+    .markdown-body em { color: #0f766e; }
+    .markdown-body code {
+      background: #f1f5f9; border: 1px solid #e2e8f0;
+      border-radius: 4px; padding: .1rem .35rem;
+      font-size: .82rem; font-family: 'Courier New', monospace; color: #1e3a5f;
+    }
+    .markdown-body pre {
+      background: #0f2744; color: #e2e8f0;
+      border-radius: 8px; padding: 1rem;
+      overflow-x: auto; margin: .8rem 0;
+    }
+    .markdown-body pre code { background: none; border: none; color: inherit; padding: 0; }
+    .markdown-body blockquote {
+      border-left: 4px solid #0d9488;
+      background: #f0fdfa;
+      padding: .6rem 1rem;
+      margin: .8rem 0;
+      border-radius: 0 8px 8px 0;
+      color: #134e4a;
+    }
+    .markdown-body blockquote p { margin: .2rem 0; }
+    .markdown-body table { width: 100%; border-collapse: collapse; margin: .8rem 0; font-size: .85rem; }
+    .markdown-body th { background: #0f766e; color: #fff; padding: .5rem .75rem; text-align: left; font-weight: 600; }
+    .markdown-body td { padding: .45rem .75rem; border-bottom: 1px solid #e2e8f0; }
+    .markdown-body tr:nth-child(even) td { background: #f8fafc; }
+    .markdown-body hr { border: none; border-top: 1px solid #e2e8f0; margin: 1rem 0; }
+    /* PubChem structural images */
+    .markdown-body img {
+      max-width: 220px;
+      height: auto;
+      display: block;
+      margin: .75rem auto;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+      border: 1px solid #e2e8f0;
+      background: #fff;
+    }
+
+    /* Pharmacy180 callout */
+    .pharmacy180-block {
+      border: 2px solid #0d9488;
+      background: linear-gradient(135deg, #f0fdfa 0%, #ccfbf1 100%);
+      border-radius: 12px;
+      padding: 1rem 1.2rem;
+      margin-top: 1rem;
+    }
+    .pharmacy180-block .markdown-body blockquote {
+      border-left: none; background: none; padding: .2rem 0;
+    }
+
+    /* Analysis loading pulse */
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    .pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+    /* Scrollbar thin */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+  </style>
+</head>
+
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans antialiased">
+
+<!-- ╔══════════════════════════╗ -->
+<!-- ║  HEADER                  ║ -->
+<!-- ╚══════════════════════════╝ -->
+<header class="bg-gradient-to-r from-navy-900 to-teal-800 shadow-lg sticky top-0 z-30" style="background: linear-gradient(135deg, #0f2744 0%, #0f766e 100%);">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 bg-white/15 rounded-xl flex items-center justify-center backdrop-blur-sm border border-white/20">
+        <svg class="w-6 h-6 text-teal-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-lg font-bold text-white tracking-tight leading-none">PharmaScanKE</h1>
+        <p class="text-teal-300 text-xs font-medium">D.Pharma Study Vault &amp; AI Analysis · CDACC</p>
+      </div>
+    </div>
+    <div class="hidden sm:flex items-center gap-3">
+      <div class="flex items-center gap-2 bg-white/10 rounded-lg px-3 py-1.5 border border-white/15">
+        <svg class="w-3.5 h-3.5 text-teal-300" fill="currentColor" viewBox="0 0 20 20">
+          <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+        </svg>
+        <span class="text-white text-sm font-semibold" id="header-count">0</span>
+        <span class="text-teal-300 text-xs">resources</span>
+      </div>
+      <div class="w-2 h-2 rounded-full bg-pharma-400 animate-pulse" title="API connected"></div>
+    </div>
+  </div>
+
+  <!-- Tab navigation -->
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-white/10">
+    <nav class="flex gap-6">
+      <button id="tab-vault" class="tab-btn active text-sm font-medium text-white/80 py-3 px-1 focus:outline-none" onclick="switchTab('vault')">
+        📚 Study Vault
+      </button>
+      <button id="tab-analysis" class="tab-btn text-sm font-medium text-white/60 py-3 px-1 focus:outline-none" onclick="switchTab('analysis')">
+        🔬 AI Analysis
+      </button>
+    </nav>
+  </div>
+</header>
+
+<!-- ╔══════════════════════════╗ -->
+<!-- ║  MAIN                    ║ -->
+<!-- ╚══════════════════════════╝ -->
+<main class="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!-- VAULT TAB                                       -->
+  <!-- ══════════════════════════════════════════════ -->
+  <div id="panel-vault">
+
+    <!-- Stats bar -->
+    <div id="stats-bar" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3">
+        <div class="w-9 h-9 bg-teal-50 rounded-lg flex items-center justify-center">
+          <svg class="w-5 h-5 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500 font-medium">Total Resources</p>
+          <p class="text-xl font-bold text-slate-800" id="stat-total">—</p>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3">
+        <div class="w-9 h-9 bg-pharma-50 rounded-lg flex items-center justify-center">
+          <svg class="w-5 h-5 text-pharma-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500 font-medium">Top Semester</p>
+          <p class="text-base font-bold text-slate-800 truncate" id="stat-top-semester">—</p>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3">
+        <div class="w-9 h-9 bg-blue-50 rounded-lg flex items-center justify-center">
+          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" /></svg>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500 font-medium">Top Subject</p>
+          <p class="text-base font-bold text-slate-800 truncate" id="stat-top-subject">—</p>
+        </div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3">
+        <div class="w-9 h-9 bg-violet-50 rounded-lg flex items-center justify-center">
+          <svg class="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500 font-medium">Last Upload</p>
+          <p class="text-sm font-bold text-slate-800 truncate" id="stat-last-upload">—</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload panel -->
+    <section class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-5">
+      <div class="border-b border-slate-100 px-5 py-3.5 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+          <h2 class="text-sm font-semibold text-slate-700">Upload Study Resource</h2>
+        </div>
+        <button id="toggle-upload" class="text-slate-400 hover:text-slate-600 transition-colors text-xs flex items-center gap-1">
+          <span id="toggle-upload-label">Collapse</span>
+          <svg id="toggle-icon" class="w-4 h-4 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+          </svg>
+        </button>
+      </div>
+      <div id="upload-body" class="p-5">
+        <form id="upload-form" novalidate class="space-y-4">
+          <!-- Drop zone -->
+          <div id="drop-zone" class="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center cursor-pointer transition-all duration-200 hover:border-teal-400 hover:bg-teal-50">
+            <input type="file" id="file-input" class="hidden" accept=".pdf,.docx,.doc,.pptx,.ppt" />
+            <div id="drop-idle" class="space-y-2">
+              <div class="flex justify-center">
+                <div class="w-12 h-12 bg-teal-50 rounded-xl flex items-center justify-center">
+                  <svg class="w-6 h-6 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+              </div>
+              <p class="text-slate-600 text-sm font-medium">Drag &amp; drop or <span class="text-teal-600 font-semibold hover:underline">browse</span></p>
+              <p class="text-slate-400 text-xs">PDF, DOCX, DOC, PPTX, PPT — up to 50 MB</p>
+            </div>
+            <div id="drop-selected" class="hidden space-y-1">
+              <div class="flex justify-center">
+                <div class="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                  <svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+                </div>
+              </div>
+              <p id="selected-name" class="text-slate-700 font-semibold text-sm break-all"></p>
+              <p id="selected-size" class="text-slate-400 text-xs"></p>
+              <button type="button" id="clear-file" class="text-xs text-red-400 hover:text-red-600 underline">Remove file</button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="sm:col-span-3">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Document Title <span class="text-red-400">*</span></label>
+              <input id="input-title" type="text" required placeholder="e.g. Pharmaceutics I: Introduction to Dosage Forms"
+                class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent transition" />
+              <p id="err-title" class="text-xs text-red-500 mt-1 hidden">Title is required (min 2 chars).</p>
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Subject / Module <span class="text-red-400">*</span></label>
+              <input id="input-subject" type="text" required placeholder="e.g. Pharmacology"
+                class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent transition" />
+              <p id="err-subject" class="text-xs text-red-500 mt-1 hidden">Subject is required.</p>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Semester <span class="text-red-400">*</span></label>
+              <select id="input-semester" required
+                class="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent appearance-none cursor-pointer transition">
+                <option value="" disabled selected>Select…</option>
+                <option value="Y1S1">Year 1 – S1</option>
+                <option value="Y1S2">Year 1 – S2</option>
+                <option value="Y2S1">Year 2 – S1</option>
+                <option value="Y2S2">Year 2 – S2</option>
+                <option value="Y3S1">Year 3 – S1</option>
+                <option value="Y3S2">Year 3 – S2</option>
+              </select>
+              <p id="err-semester" class="text-xs text-red-500 mt-1 hidden">Semester is required.</p>
+            </div>
+          </div>
+
+          <div class="flex justify-end">
+            <button id="submit-btn" type="submit"
+              class="inline-flex items-center gap-2 bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm px-5 py-2.5 rounded-xl transition-all shadow-sm hover:shadow-md disabled:opacity-60 disabled:cursor-not-allowed">
+              <svg id="btn-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+              <svg id="btn-spinner" class="w-4 h-4 spinner hidden" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+              <span id="btn-text">Upload to Vault</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Search + filter -->
+    <div class="space-y-3 mb-4">
+      <div class="relative">
+        <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0" /></svg>
+        <input id="search-input" type="text" placeholder="Search by title or subject…"
+          class="w-full pl-10 pr-10 py-2.5 rounded-xl border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent shadow-sm transition" />
+        <button id="clear-search" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500 hidden"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg></button>
+      </div>
+      <div class="flex flex-wrap gap-2 items-center">
+        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wide">Filter:</span>
+        <button class="semester-pill pill-active text-xs font-semibold px-3 py-1.5 rounded-full border border-teal-200 transition-all" data-semester="ALL">All</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y1S1">Y1 – S1</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y1S2">Y1 – S2</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y2S1">Y2 – S1</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y2S2">Y2 – S2</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y3S1">Y3 – S1</button>
+        <button class="semester-pill text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700 transition-all" data-semester="Y3S2">Y3 – S2</button>
+      </div>
+    </div>
+
+    <!-- Resource grid -->
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm text-slate-500">Showing <span id="result-count" class="font-semibold text-slate-700">0</span> resource(s)</p>
+      <div id="loading-bar" class="hidden flex items-center gap-2 text-xs text-teal-600">
+        <svg class="w-3.5 h-3.5 spinner" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+        Loading…
+      </div>
+    </div>
+
+    <div id="cards-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+
+    <div id="empty-state" class="hidden flex flex-col items-center justify-center py-16 space-y-3 text-center">
+      <div class="w-14 h-14 bg-slate-100 rounded-2xl flex items-center justify-center">
+        <svg class="w-7 h-7 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+      </div>
+      <p class="text-slate-500 font-medium text-sm">No resources found</p>
+      <p class="text-slate-400 text-xs">Try adjusting your search or upload your first resource above.</p>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════ -->
+  <!-- ANALYSIS TAB                                    -->
+  <!-- ══════════════════════════════════════════════ -->
+  <div id="panel-analysis" class="hidden space-y-5">
+
+    <!-- Engine header -->
+    <div class="bg-gradient-to-r from-navy-900 to-teal-800 rounded-2xl p-5 text-white" style="background: linear-gradient(135deg, #0f2744 0%, #0f766e 100%);">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-bold tracking-tight">PharmaScanKE Analysis Engine</h2>
+          <p class="text-teal-200 text-sm mt-1">CDACC D.Pharm AI — powered by DeepSeek via Groq · PubChem drug structures · Pharmacy180 references</p>
+        </div>
+        <div class="flex-shrink-0 w-10 h-10 bg-white/15 rounded-xl flex items-center justify-center border border-white/20">
+          <svg class="w-5 h-5 text-teal-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input panel -->
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+
+      <!-- Text-Only Mode Toggle — prominently placed ABOVE the file zone -->
+      <div class="flex items-center justify-between p-3 bg-teal-50 rounded-xl border border-teal-100">
+        <div>
+          <p class="text-sm font-semibold text-teal-800">Text-Only Mode</p>
+          <p class="text-xs text-teal-600 mt-0.5">Skip file upload — analyse concepts, questions, or drug notes directly</p>
+        </div>
+        <label class="toggle-switch ml-4">
+          <input type="checkbox" id="text-only-toggle" />
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+      <!-- File drop zone (hidden in Text-Only Mode) -->
+      <div id="analysis-file-zone">
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Attach Pharmacy Document <span class="text-slate-400 font-normal normal-case">(optional)</span></label>
+        <div id="analysis-drop-zone" class="border-2 border-dashed border-slate-300 rounded-xl p-5 text-center cursor-pointer transition-all duration-200 hover:border-teal-400 hover:bg-teal-50">
+          <input type="file" id="analysis-file-input" class="hidden" accept=".pdf,.docx,.doc,.pptx,.ppt" />
+          <div id="analysis-drop-idle" class="space-y-1.5">
+            <div class="flex justify-center">
+              <div class="w-10 h-10 bg-teal-50 rounded-lg flex items-center justify-center">
+                <svg class="w-5 h-5 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
+              </div>
+            </div>
+            <p class="text-sm text-slate-600 font-medium">Drag &amp; drop a pharmacy document or <span class="text-teal-600 font-semibold">browse</span></p>
+            <p class="text-xs text-slate-400">PDF, DOCX, PPTX — will be sent to the AI for context-aware analysis</p>
+          </div>
+          <div id="analysis-drop-selected" class="hidden flex items-center justify-center gap-3">
+            <div class="w-8 h-8 bg-emerald-50 rounded-lg flex items-center justify-center">
+              <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+            </div>
+            <div class="text-left">
+              <p id="analysis-selected-name" class="text-sm font-semibold text-slate-700"></p>
+              <button type="button" id="clear-analysis-file" class="text-xs text-red-400 hover:text-red-600 underline">Remove</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt textarea -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Analysis Prompt <span class="text-red-400">*</span></label>
+        <textarea id="analysis-prompt" rows="4"
+          placeholder="Describe the drug class, mechanism, or clinical concept to analyse…"
+          class="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-400 focus:border-transparent transition resize-none"></textarea>
+        <p id="err-prompt" class="text-xs text-red-500 mt-1 hidden">Please enter a prompt before analysing.</p>
+      </div>
+
+      <!-- Analyse button -->
+      <div class="flex items-center justify-between">
+        <p class="text-xs text-slate-400 italic" id="mode-indicator">Mode: <span class="font-semibold text-teal-700" id="mode-label">File + Text</span></p>
+        <button id="analyse-btn"
+          class="inline-flex items-center gap-2 bg-teal-700 hover:bg-teal-800 text-white font-semibold text-sm px-6 py-2.5 rounded-xl transition-all shadow-sm hover:shadow-md disabled:opacity-60 disabled:cursor-not-allowed">
+          <svg id="analyse-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          <svg id="analyse-spinner" class="w-4 h-4 spinner hidden" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+          <span id="analyse-text">Analyse</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Analysis result -->
+    <div id="analysis-result" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div class="border-b border-slate-100 px-5 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-teal-500"></div>
+          <h3 class="text-sm font-semibold text-slate-700">Analysis Result</h3>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="result-meta" class="text-xs text-slate-400"></span>
+          <button id="copy-result" class="text-xs text-teal-600 hover:text-teal-800 font-medium flex items-center gap-1 transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+            Copy
+          </button>
+        </div>
+      </div>
+      <div id="analysis-output" class="p-5 markdown-body"></div>
+    </div>
+
+    <!-- Loading skeleton -->
+    <div id="analysis-loading" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+      <div class="flex items-center gap-3 mb-2">
+        <svg class="w-4 h-4 spinner text-teal-600" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+        <span class="text-sm font-medium text-teal-700">Consulting DeepSeek AI — analysing your content…</span>
+      </div>
+      <div class="space-y-2">
+        <div class="h-3 bg-slate-100 rounded pulse w-full"></div>
+        <div class="h-3 bg-slate-100 rounded pulse w-5/6"></div>
+        <div class="h-3 bg-slate-100 rounded pulse w-4/6"></div>
+        <div class="h-8 bg-slate-100 rounded pulse w-full mt-3"></div>
+        <div class="h-3 bg-slate-100 rounded pulse w-full"></div>
+        <div class="h-3 bg-slate-100 rounded pulse w-3/4"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Footer -->
+<footer class="mt-auto border-t border-slate-200 bg-white">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+    <span class="text-sm text-slate-500">PharmaScanKE · CDACC D.Pharm Study Vault &amp; AI Analysis Portal</span>
+    <span class="text-sm text-slate-400"><strong><em>Made wt ♥️ by <a href="https://wa.me/254717702563" target="_blank" rel="noopener noreferrer" class="text-green-600 hover:text-green-700 underline underline-offset-2 transition-colors">P.oRiot</a></em></strong></span>
+  </div>
+</footer>
+
+<!-- Toast -->
+<div id="toast" role="alert" class="hidden fixed bottom-6 right-6 max-w-xs z-50 rounded-xl shadow-lg px-4 py-3 flex items-center gap-3 text-sm font-medium">
+  <svg id="toast-icon" class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"></svg>
+  <span id="toast-msg"></span>
+</div>
+
+<!-- Delete Confirm Modal -->
+<div id="confirm-modal" class="hidden fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+  <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-4">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center flex-shrink-0">
+        <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+      </div>
+      <div>
+        <h3 class="text-slate-800 font-semibold">Delete Resource?</h3>
+        <p class="text-slate-500 text-sm mt-1" id="confirm-msg"></p>
+      </div>
+    </div>
+    <div class="flex justify-end gap-3">
+      <button id="confirm-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Cancel</button>
+      <button id="confirm-delete" class="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition shadow-sm">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+(function () {
+
+  /* ── State ────────────────────────────────────────── */
+  let allNotes       = [];
+  let activeSemester = 'ALL';
+  let searchQuery    = '';
+  let pendingDeleteId = null;
+  let analysisFile   = null;
+  let rawAnalysis    = '';
+
+  /* ── DOM refs ──────────────────────────────────────── */
+  const $ = id => document.getElementById(id);
+
+  /* ── Helpers ───────────────────────────────────────── */
+  function fmtBytes(b) {
+    if (b < 1024) return `${b} B`;
+    if (b < 1048576) return `${(b/1024).toFixed(1)} KB`;
+    return `${(b/1048576).toFixed(1)} MB`;
+  }
+  function fmtDate(iso) {
+    return new Date(iso).toLocaleDateString('en-KE', { year:'numeric', month:'short', day:'numeric' });
+  }
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function semLabel(c) {
+    return { Y1S1:'Year 1 · S1', Y1S2:'Year 1 · S2', Y2S1:'Year 2 · S1',
+             Y2S2:'Year 2 · S2', Y3S1:'Year 3 · S1', Y3S2:'Year 3 · S2' }[c] || c;
+  }
+  function semColor(c) {
+    return { Y1S1:'bg-violet-100 text-violet-700', Y1S2:'bg-purple-100 text-purple-700',
+             Y2S1:'bg-sky-100 text-sky-700', Y2S2:'bg-teal-100 text-teal-700',
+             Y3S1:'bg-emerald-100 text-emerald-700', Y3S2:'bg-pharma-100 text-pharma-700' }[c] || 'bg-slate-100 text-slate-600';
+  }
+  function extIcon(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    return { pdf:['text-red-500','bg-red-50','PDF'], docx:['text-blue-500','bg-blue-50','DOCX'],
+             doc:['text-blue-500','bg-blue-50','DOC'], pptx:['text-orange-500','bg-orange-50','PPTX'],
+             ppt:['text-orange-500','bg-orange-50','PPT'] }[ext] || ['text-slate-500','bg-slate-100',ext.toUpperCase()];
+  }
+
+  /* ── Toast ──────────────────────────────────────────── */
+  let toastTimer;
+  function showToast(msg, type = 'success') {
+    const toast = $('toast');
+    const icon  = $('toast-icon');
+    const colors = { success:'bg-emerald-50 text-emerald-800 border border-emerald-200',
+                     error:'bg-red-50 text-red-800 border border-red-200',
+                     info:'bg-blue-50 text-blue-800 border border-blue-200' };
+    toast.className = `fixed bottom-6 right-6 max-w-xs z-50 rounded-xl shadow-lg px-4 py-3 flex items-center gap-3 text-sm font-medium visible ${colors[type]||colors.info}`;
+    const paths = {
+      success:'<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>',
+      error:'<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>',
+      info:'<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>'
+    };
+    icon.innerHTML = paths[type]||paths.info;
+    $('toast-msg').textContent = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.add('hidden'), 4500);
+  }
+
+  /* ── Tab switching ──────────────────────────────────── */
+  window.switchTab = function(tab) {
+    ['vault','analysis'].forEach(t => {
+      $(`panel-${t}`).classList.toggle('hidden', t !== tab);
+      $(`tab-${t}`).classList.toggle('active', t === tab);
+    });
+  };
+
+  /* ── Upload panel collapse ──────────────────────────── */
+  let uploadOpen = true;
+  $('toggle-upload').addEventListener('click', () => {
+    uploadOpen = !uploadOpen;
+    $('upload-body').style.display = uploadOpen ? '' : 'none';
+    $('toggle-icon').style.transform = uploadOpen ? '' : 'rotate(180deg)';
+    $('toggle-upload-label').textContent = uploadOpen ? 'Collapse' : 'Expand';
+  });
+
+  /* ── Vault file drop zone ───────────────────────────── */
+  function setVaultFile(file) {
+    if (!file) return;
+    const ok = ['.pdf','.docx','.doc','.pptx','.ppt'];
+    if (!ok.includes('.' + file.name.split('.').pop().toLowerCase())) {
+      showToast(`File type not allowed.`, 'error'); return;
+    }
+    $('selected-name').textContent = file.name;
+    $('selected-size').textContent = fmtBytes(file.size);
+    $('drop-idle').classList.add('hidden');
+    $('drop-selected').classList.remove('hidden');
+  }
+  $('drop-zone').addEventListener('click', e => { if (e.target !== $('clear-file')) $('file-input').click(); });
+  $('file-input').addEventListener('change', () => { if ($('file-input').files[0]) setVaultFile($('file-input').files[0]); });
+  $('drop-zone').addEventListener('dragover', e => { e.preventDefault(); $('drop-zone').classList.add('drag-over'); });
+  $('drop-zone').addEventListener('dragleave', () => $('drop-zone').classList.remove('drag-over'));
+  $('drop-zone').addEventListener('drop', e => {
+    e.preventDefault(); $('drop-zone').classList.remove('drag-over');
+    const f = e.dataTransfer.files[0]; if (f) { const dt = new DataTransfer(); dt.items.add(f); $('file-input').files = dt.files; setVaultFile(f); }
+  });
+  $('clear-file').addEventListener('click', e => {
+    e.stopPropagation(); $('file-input').value = '';
+    $('drop-selected').classList.add('hidden'); $('drop-idle').classList.remove('hidden');
+  });
+
+  /* ── Vault form validation & submit ─────────────────── */
+  function validateVault() {
+    let ok = true;
+    const checks = [
+      [$('input-title'), $('err-title'), $('input-title').value.trim().length < 2],
+      [$('input-subject'), $('err-subject'), !$('input-subject').value.trim()],
+      [$('input-semester'), $('err-semester'), !$('input-semester').value],
+    ];
+    checks.forEach(([inp, err, fail]) => {
+      err.classList.toggle('hidden', !fail);
+      inp.classList.toggle('border-red-400', fail);
+      if (fail) ok = false;
+    });
+    if (!$('file-input').files || !$('file-input').files[0]) {
+      showToast('Please select a file to upload.', 'error'); ok = false;
+    }
+    return ok;
+  }
+
+  $('upload-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!validateVault()) return;
+    const btn = $('submit-btn');
+    btn.disabled = true; $('btn-icon').classList.add('hidden'); $('btn-spinner').classList.remove('hidden'); $('btn-text').textContent = 'Uploading…';
+    const fd = new FormData();
+    fd.append('file', $('file-input').files[0]);
+    fd.append('title', $('input-title').value.trim());
+    fd.append('subject', $('input-subject').value.trim());
+    fd.append('semester', $('input-semester').value);
+    try {
+      const r = await fetch('/api/upload', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.detail || 'Upload failed.', 'error'); return; }
+      showToast('Resource uploaded successfully!', 'success');
+      $('upload-form').reset(); $('file-input').value = '';
+      $('drop-selected').classList.add('hidden'); $('drop-idle').classList.remove('hidden');
+      await loadNotes(); await loadStats();
+    } catch { showToast('Network error — please try again.', 'error'); }
+    finally {
+      btn.disabled = false; $('btn-icon').classList.remove('hidden');
+      $('btn-spinner').classList.add('hidden'); $('btn-text').textContent = 'Upload to Vault';
+    }
+  });
+
+  /* ── Load stats ─────────────────────────────────────── */
+  async function loadStats() {
+    try {
+      const r = await fetch('/api/notes/stats');
+      const d = await r.json();
+      $('stat-total').textContent = d.total ?? 0;
+      $('header-count').textContent = d.total ?? 0;
+      const topSem = d.by_semester?.[0];
+      $('stat-top-semester').textContent = topSem ? `${semLabel(topSem.semester)} (${topSem.count})` : '—';
+      const topSub = d.by_subject?.[0];
+      $('stat-top-subject').textContent = topSub ? topSub.subject : '—';
+      const lastDate = d.recent?.[0]?.upload_date;
+      $('stat-last-upload').textContent = lastDate ? fmtDate(lastDate) : '—';
+    } catch { /* non-critical */ }
+  }
+
+  /* ── Load notes ─────────────────────────────────────── */
+  async function loadNotes() {
+    $('loading-bar').classList.remove('hidden');
+    try {
+      const r = await fetch('/api/notes');
+      const d = await r.json();
+      allNotes = d.items || [];
+    } catch { showToast('Could not load resources.', 'error'); allNotes = []; }
+    finally { $('loading-bar').classList.add('hidden'); renderCards(); }
+  }
+
+  /* ── Render resource cards ──────────────────────────── */
+  function renderCards() {
+    const q = searchQuery.toLowerCase();
+    const filtered = allNotes.filter(n =>
+      (activeSemester === 'ALL' || n.semester === activeSemester) &&
+      (!q || n.title.toLowerCase().includes(q) || n.subject.toLowerCase().includes(q))
+    );
+    $('result-count').textContent = filtered.length;
+    const grid = $('cards-grid');
+    grid.innerHTML = '';
+    if (!filtered.length) { $('empty-state').classList.remove('hidden'); return; }
+    $('empty-state').classList.add('hidden');
+    filtered.forEach((note, i) => {
+      const [clr, bg, label] = extIcon(note.file_name);
+      const card = document.createElement('div');
+      card.className = 'card-enter bg-white rounded-2xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col overflow-hidden';
+      card.style.animationDelay = `${i * 25}ms`;
+      card.innerHTML = `
+        <div class="p-4 flex-1 space-y-3">
+          <div class="flex items-start gap-3">
+            <div class="w-9 h-9 ${bg} rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
+              <span class="${clr} text-xs font-bold">${label}</span>
+            </div>
+            <h3 class="text-slate-800 font-semibold text-sm leading-snug line-clamp-2 flex-1">${esc(note.title)}</h3>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <span class="inline-flex items-center text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">${esc(note.subject)}</span>
+            <span class="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full ${semColor(note.semester)}">${semLabel(note.semester)}</span>
+          </div>
+          <p class="text-slate-400 text-xs">${fmtDate(note.upload_date)}</p>
+        </div>
+        <div class="border-t border-slate-100 px-4 py-2.5 flex items-center justify-between bg-slate-50/50">
+          <a href="${esc(note.file_path)}" target="_blank" rel="noopener"
+            class="inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900 transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+            View / Download
+          </a>
+          <button class="delete-btn inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-red-500 transition-colors"
+            data-id="${note.id}" data-title="${esc(note.title)}">
+            <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+            Delete
+          </button>
+        </div>`;
+      grid.appendChild(card);
+    });
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        pendingDeleteId = parseInt(btn.dataset.id, 10);
+        $('confirm-msg').textContent = `"${btn.dataset.title}" will be permanently removed.`;
+        $('confirm-modal').classList.remove('hidden');
+      });
+    });
+  }
+
+  /* ── Semester pills ─────────────────────────────────── */
+  document.querySelectorAll('.semester-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      document.querySelectorAll('.semester-pill').forEach(p => {
+        p.classList.remove('pill-active');
+        p.classList.add('bg-white', 'text-slate-600', 'border-slate-200');
+      });
+      pill.classList.add('pill-active');
+      pill.classList.remove('bg-white', 'text-slate-600', 'border-slate-200');
+      activeSemester = pill.dataset.semester;
+      renderCards();
+    });
+  });
+
+  /* ── Search ─────────────────────────────────────────── */
+  $('search-input').addEventListener('input', () => {
+    searchQuery = $('search-input').value;
+    $('clear-search').classList.toggle('hidden', !searchQuery);
+    renderCards();
+  });
+  $('clear-search').addEventListener('click', () => {
+    $('search-input').value = ''; searchQuery = ''; $('clear-search').classList.add('hidden'); renderCards();
+  });
+
+  /* ── Delete modal ───────────────────────────────────── */
+  $('confirm-cancel').addEventListener('click', () => { $('confirm-modal').classList.add('hidden'); pendingDeleteId = null; });
+  $('confirm-delete').addEventListener('click', async () => {
+    if (!pendingDeleteId) return;
+    $('confirm-modal').classList.add('hidden');
+    try {
+      const r = await fetch(`/api/notes/${pendingDeleteId}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.detail || 'Delete failed.', 'error'); return; }
+      showToast('Resource removed from vault.', 'success');
+      await loadNotes(); await loadStats();
+    } catch { showToast('Network error while deleting.', 'error'); }
+    finally { pendingDeleteId = null; }
+  });
+  $('confirm-modal').addEventListener('click', e => { if (e.target === $('confirm-modal')) { $('confirm-modal').classList.add('hidden'); pendingDeleteId = null; } });
+
+  /* ── Analysis: Text-Only Mode Toggle ───────────────── */
+  const textOnlyToggle = $('text-only-toggle');
+  const fileZone       = $('analysis-file-zone');
+  const modeLabel      = $('mode-label');
+  const promptEl       = $('analysis-prompt');
+
+  function updateToggleState() {
+    const textOnly = textOnlyToggle.checked;
+    fileZone.style.transition = 'opacity .25s ease, max-height .3s ease';
+    if (textOnly) {
+      fileZone.style.opacity = '0';
+      fileZone.style.maxHeight = '0';
+      fileZone.style.overflow = 'hidden';
+      fileZone.style.pointerEvents = 'none';
+      promptEl.placeholder = 'Enter pharmacy notes, questions, or drug concepts to analyse…';
+      modeLabel.textContent = 'Text-Only';
+      modeLabel.className = 'font-semibold text-teal-600';
+    } else {
+      fileZone.style.opacity = '1';
+      fileZone.style.maxHeight = '500px';
+      fileZone.style.overflow = '';
+      fileZone.style.pointerEvents = '';
+      promptEl.placeholder = 'Describe the drug class, mechanism, or clinical concept to analyse…';
+      modeLabel.textContent = 'File + Text';
+      modeLabel.className = 'font-semibold text-teal-700';
+    }
+  }
+  textOnlyToggle.addEventListener('change', updateToggleState);
+  updateToggleState();
+
+  /* ── Analysis file drop zone ────────────────────────── */
+  function setAnalysisFile(file) {
+    if (!file) return;
+    if (!['.pdf','.docx','.doc','.pptx','.ppt'].includes('.' + file.name.split('.').pop().toLowerCase())) {
+      showToast('File type not supported for analysis.', 'error'); return;
+    }
+    analysisFile = file;
+    $('analysis-selected-name').textContent = file.name;
+    $('analysis-drop-idle').classList.add('hidden');
+    $('analysis-drop-selected').classList.remove('hidden');
+  }
+  $('analysis-drop-zone').addEventListener('click', e => { if (e.target !== $('clear-analysis-file')) $('analysis-file-input').click(); });
+  $('analysis-file-input').addEventListener('change', () => { if ($('analysis-file-input').files[0]) setAnalysisFile($('analysis-file-input').files[0]); });
+  $('analysis-drop-zone').addEventListener('dragover', e => { e.preventDefault(); $('analysis-drop-zone').classList.add('drag-over'); });
+  $('analysis-drop-zone').addEventListener('dragleave', () => $('analysis-drop-zone').classList.remove('drag-over'));
+  $('analysis-drop-zone').addEventListener('drop', e => {
+    e.preventDefault(); $('analysis-drop-zone').classList.remove('drag-over');
+    const f = e.dataTransfer.files[0]; if (f) setAnalysisFile(f);
+  });
+  $('clear-analysis-file').addEventListener('click', e => {
+    e.stopPropagation(); analysisFile = null; $('analysis-file-input').value = '';
+    $('analysis-drop-selected').classList.add('hidden'); $('analysis-drop-idle').classList.remove('hidden');
+  });
+
+  /* ── Analysis: base64 reader ────────────────────────── */
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const result = e.target.result;
+        // Strip "data:...;base64," prefix
+        resolve(result.split(',')[1] || result);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* ── Analysis: configure marked ─────────────────────── */
+  marked.setOptions({ breaks: true, gfm: true });
+
+  /* ── Analysis: submit ───────────────────────────────── */
+  $('analyse-btn').addEventListener('click', async () => {
+    const prompt = $('analysis-prompt').value.trim();
+    if (!prompt) { $('err-prompt').classList.remove('hidden'); return; }
+    $('err-prompt').classList.add('hidden');
+
+    const textOnly = textOnlyToggle.checked;
+    let fileData = null;
+    let fileName = null;
+
+    if (!textOnly && analysisFile) {
+      try {
+        fileData = await readFileAsBase64(analysisFile);
+        fileName = analysisFile.name;
+      } catch { showToast('Could not read file.', 'error'); return; }
+    }
+
+    // UI loading state
+    const btn = $('analyse-btn');
+    btn.disabled = true;
+    $('analyse-icon').classList.add('hidden');
+    $('analyse-spinner').classList.remove('hidden');
+    $('analyse-text').textContent = 'Analysing…';
+    $('analysis-result').classList.add('hidden');
+    $('analysis-loading').classList.remove('hidden');
+
+    try {
+      const payload = { prompt, file_data: fileData, file_name: fileName, text_only: textOnly };
+      const r = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) { showToast(d.detail || 'Analysis failed.', 'error'); return; }
+
+      rawAnalysis = d.analysis;
+      const html = DOMPurify.sanitize(marked.parse(d.analysis), {
+        ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
+      });
+      $('analysis-output').innerHTML = html;
+
+      const meta = [d.model ? `Model: ${d.model}` : null, d.tokens_used ? `${d.tokens_used} tokens` : null]
+        .filter(Boolean).join(' · ');
+      $('result-meta').textContent = meta;
+
+      $('analysis-loading').classList.add('hidden');
+      $('analysis-result').classList.remove('hidden');
+    } catch (err) {
+      showToast('Analysis request failed — check your connection.', 'error');
+      $('analysis-loading').classList.add('hidden');
+    } finally {
+      btn.disabled = false;
+      $('analyse-icon').classList.remove('hidden');
+      $('analyse-spinner').classList.add('hidden');
+      $('analyse-text').textContent = 'Analyse';
+    }
+  });
+
+  /* ── Copy result ────────────────────────────────────── */
+  $('copy-result').addEventListener('click', () => {
+    if (!rawAnalysis) return;
+    navigator.clipboard.writeText(rawAnalysis).then(() => showToast('Analysis copied to clipboard!', 'info'));
+  });
+
+  /* ── Init ───────────────────────────────────────────── */
+  Promise.all([loadNotes(), loadStats()]);
+
+})();
+</script>
+
+</body>
+</html>
