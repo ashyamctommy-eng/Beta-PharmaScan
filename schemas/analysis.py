@@ -18,6 +18,7 @@ class AnalysisRequest(BaseModel):
     file_data: Optional[str] = Field(None, description="Base64-encoded file content (without data URI prefix)")
     file_name: Optional[str] = Field(None, description="Original filename with extension")
     text_only: bool = Field(False, description="If True, skip file validation and use text-only pipeline")
+    subject: Optional[str] = Field(None, description="CDACC subject/unit context selected by student")
 
 
 class Pharmacy180Ref(BaseModel):
