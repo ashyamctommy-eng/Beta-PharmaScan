@@ -317,22 +317,28 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         # Pure text-only pipeline — bypass file handling, route straight to text completion
         messages.append({"role": "user", "content": body.prompt})
 
-    try:
+        try:
         completion = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=messages,
             max_tokens=settings.GROQ_MAX_TOKENS,
             temperature=settings.GROQ_TEMPERATURE,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger_msg = f"Groq API call failed: {exc}"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI analysis service unavailable: {exc}",
+            detail=f"AI analysis service unavailable: {type(exc).__name__}: {exc}",
         ) from exc
 
-    raw = completion.choices[0].message.content or "No response generated."
+    if not completion.choices:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Groq returned an empty choices list — no response generated.",
+        )
 
+    raw = completion.choices[0].message.content or "No response generated."
     # Strip <think>…</think> reasoning blocks from DeepSeek-R1
     import re as _re
     analysis = _re.sub(r"<think>[\s\S]*?</think>", "", raw).strip()
