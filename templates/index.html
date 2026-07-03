@@ -916,13 +916,13 @@
     try {
       const payload = { prompt, file_data: fileData, file_name: fileName, text_only: textOnly };
       const r = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const d = await r.json();
-      if (!r.ok) { showToast(d.detail || 'Analysis failed.', 'error'); return; }
-
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(payload),
+});
+let d = {};
+try { d = await r.json(); } catch { /* non-JSON body (e.g. Railway 502/504 HTML) */ }
+if (!r.ok) { showToast(d.detail || `Analysis failed (HTTP ${r.status}).`, 'error'); return; }
       rawAnalysis = d.analysis;
       const html = DOMPurify.sanitize(marked.parse(d.analysis), {
         ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
