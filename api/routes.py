@@ -302,7 +302,9 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         except Exception:
             excerpt = "[Could not decode file content]"
 
+        subject_line = f"Subject/Unit Context: {body.subject}\n" if body.subject else ""
         file_ctx = (
+            f"{subject_line}"
             f"The user has uploaded a pharmacy study document for analysis.\n"
             f"Filename: {body.file_name} ({ext})\n"
             f"File size: ~{len(body.file_data) // 1365} KB\n\n"
@@ -314,8 +316,9 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         )
         messages.append({"role": "user", "content": file_ctx})
     else:
-        # Pure text-only pipeline — bypass file handling, route straight to text completion
-        messages.append({"role": "user", "content": body.prompt})
+        # Pure text-only pipeline — prepend subject context if provided
+        subject_ctx = f"[Subject/Unit: {body.subject}]\n\n" if body.subject else ""
+        messages.append({"role": "user", "content": f"{subject_ctx}{body.prompt}"})
 
     try:
         completion = await client.chat.completions.create(
@@ -327,9 +330,12 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
     except HTTPException:
         raise
     except Exception as exc:
+        # Log full detail server-side; return generic message to client
+        import logging as _log
+        _log.getLogger(__name__).error("Groq call failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI analysis service unavailable: {type(exc).__name__}: {exc}",
+            detail="AI analysis service is temporarily unavailable. Please try again.",
         ) from exc
 
     if not completion.choices:
