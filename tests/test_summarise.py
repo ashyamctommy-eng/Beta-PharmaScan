@@ -490,6 +490,122 @@ class TestReviewRegressions(PipelineCase):
         self.assertFalse(blocked)
         self.assertEqual(remaining, 1_000, "the app-wide room must bound the per-client room")
 
+    def test_same_content_uploaded_twice_resolves_to_the_same_notes(self) -> None:
+        """Regression: notes are cached by file hash but were looked up by resource
+        id, so the second copy of an identical PDF reported 'no summary'."""
+        from types import SimpleNamespace
+
+        from core.config import settings as app_settings
+
+        original = app_settings.UPLOAD_DIR
+        upload_dir = Path(self._dir.name) / "uploads"
+        upload_dir.mkdir(exist_ok=True)
+        (upload_dir / "notes.md").write_text("# Topic\n\nIdentical content.\n", encoding="utf-8")
+        app_settings.UPLOAD_DIR = upload_dir
+        try:
+            first = SimpleNamespace(id=1, file_name="notes.md", title="First")
+            second = SimpleNamespace(id=2, file_name="notes.md", title="Second")
+
+            async def scenario() -> tuple[int, int, int, bool]:
+                async with self.Session() as db:
+                    created = await S.get_or_create_summary(db, first, depth="brief")
+                    found_for_second = await S.get_summary(db, second)
+                    repointed = await S.get_or_create_summary(db, second, depth="brief")
+                    return (created.id, found_for_second.id if found_for_second else -1,
+                            repointed.id, repointed.resource_id == 2)
+
+            created_id, found_id, repointed_id, repointed = asyncio.run(scenario())
+            self.assertEqual(found_id, created_id, "the second copy must find the existing notes")
+            self.assertEqual(repointed_id, created_id, "it must not create a duplicate summary")
+            self.assertTrue(repointed, "the notes should re-point at the newest vault item")
+        finally:
+            app_settings.UPLOAD_DIR = original
+
+    def test_changing_depth_rebuilds_the_plan_instead_of_returning_empty_notes(self) -> None:
+        """Regression: a depth change cleared the notes and the section rows but kept
+        the outline, so the next run skipped planning and produced 0 topics."""
+        from types import SimpleNamespace
+
+        from core.config import settings as app_settings
+
+        original = app_settings.UPLOAD_DIR
+        upload_dir = Path(self._dir.name) / "uploads"
+        upload_dir.mkdir(exist_ok=True)
+        (upload_dir / "notes.md").write_text("# Topic one\n\nClearance is volume per time.\n",
+                                            encoding="utf-8")
+        app_settings.UPLOAD_DIR = upload_dir
+        try:
+            resource = SimpleNamespace(id=7, file_name="notes.md", title="Doc")
+            extraction = fake_extraction(sections=3)
+            caller = StubCaller()
+
+            async def scenario() -> tuple[list[str], int]:
+                async with self.Session() as db:
+                    summary = await S.get_or_create_summary(db, resource, depth="brief")
+                    await S.run_tick(db, summary, extraction, client_id="c", caller=caller, max_calls=8)
+                    # Now ask for a deeper rebuild of the same document.
+                    summary = await S.get_or_create_summary(db, resource, depth="standard")
+                    result = await S.run_tick(db, summary, extraction, client_id="c",
+                                              caller=caller, max_calls=10)
+                    guard = 0
+                    while result.status in ("running", "pending") and guard < 6:
+                        guard += 1
+                        result = await S.run_tick(db, summary, extraction, client_id="c",
+                                                  caller=caller, max_calls=10)
+                    return [t["heading"] for t in (result.notes or {}).get("topics", [])], result.sections_total
+
+            headings, planned = asyncio.run(scenario())
+            self.assertTrue(headings, "a depth change must rebuild the plan, not return empty notes")
+            self.assertGreater(planned, 0)
+        finally:
+            app_settings.UPLOAD_DIR = original
+
+    def test_reupload_at_a_new_depth_rebuilds_instead_of_serving_stale_notes(self) -> None:
+        """Regression: re-pointing an identical re-upload and rebuilding for a new
+        depth were chained as elif, so the combination returned the old depth's notes
+        (and 'brief' notes have no topics — the UI showed an empty summary)."""
+        from types import SimpleNamespace
+
+        from core.config import settings as app_settings
+
+        original = app_settings.UPLOAD_DIR
+        upload_dir = Path(self._dir.name) / "uploads2"
+        upload_dir.mkdir(exist_ok=True)
+        (upload_dir / "notes.md").write_text("# Topic\n\nClearance is volume per time.\n",
+                                             encoding="utf-8")
+        app_settings.UPLOAD_DIR = upload_dir
+        try:
+            first = SimpleNamespace(id=1, file_name="notes.md", title="First")
+            second = SimpleNamespace(id=2, file_name="notes.md", title="Re-upload")
+            extraction = fake_extraction(sections=3)
+            caller = StubCaller()
+
+            async def scenario() -> dict:
+                async with self.Session() as db:
+                    summary = await S.get_or_create_summary(db, first, depth="brief")
+                    await S.run_tick(db, summary, extraction, client_id="c", caller=caller, max_calls=8)
+                    brief_notes = S._load_notes(await db.get(Summary, summary.id))
+                    # Same bytes, new resource id, *and* a deeper depth in one request.
+                    again = await S.get_or_create_summary(db, second, depth="standard")
+                    result = await S.run_tick(db, again, extraction, client_id="c",
+                                              caller=caller, max_calls=10)
+                    guard = 0
+                    while result.status in ("running", "pending") and guard < 6:
+                        guard += 1
+                        result = await S.run_tick(db, again, extraction, client_id="c",
+                                                  caller=caller, max_calls=10)
+                    return {"brief_topics": len(brief_notes.get("topics", [])),
+                            "depth": result.notes.get("depth") if result.notes else None,
+                            "topics": len(result.notes.get("topics", [])) if result.notes else -1}
+
+            outcome = asyncio.run(scenario())
+            self.assertEqual(outcome["brief_topics"], 0, "brief notes legitimately have no topics")
+            self.assertEqual(outcome["depth"], "standard")
+            self.assertGreater(outcome["topics"], 0,
+                               "the re-upload at a new depth must come back with notes, not the stale cache")
+        finally:
+            app_settings.UPLOAD_DIR = original
+
     def test_failed_sections_are_counted_and_reported(self) -> None:
         extraction = fake_extraction(sections=2)
         summary = asyncio.run(self._new_summary(depth="full"))

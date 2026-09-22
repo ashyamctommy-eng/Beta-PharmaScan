@@ -84,7 +84,7 @@ async def summarise_preview(resource_id: int, depth: str = "standard",
     except ExtractionError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
-    summary = await get_summary(db, resource_id)
+    summary = await get_summary(db, resource)
     payload = extraction.preview(estimated_cost_tokens=estimate_cost_tokens(extraction, depth))
     payload["resource"] = {"id": resource.id, "title": resource.title,
                            "file_name": resource.file_name, "subject": resource.subject,
@@ -103,7 +103,8 @@ async def summarise_preview(resource_id: int, depth: str = "standard",
 
 @router.get("/summarise/{resource_id}", summary="Cached notes or current progress")
 async def summarise_status(resource_id: int, db: AsyncSession = Depends(get_db)) -> dict:
-    summary = await get_summary(db, resource_id)
+    resource = await _load_resource(db, resource_id)
+    summary = await get_summary(db, resource)
     if summary is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No summary has been generated for this document yet.")
     state = await sections_state(db, summary)
@@ -147,7 +148,8 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
         )
 
     summary = await get_or_create_summary(db, resource, depth=depth)
-    if summary.status == "done" and summary.notes_json:
+    # Only serve the cache when it matches the depth that was asked for.
+    if summary.status == "done" and summary.notes_json and summary.depth == depth:
         return {"resource_id": resource_id, "status": "done", "progress": 1.0,
                 "sections_done": summary.sections_total, "sections_total": summary.sections_total,
                 "sections_failed": summary.sections_failed,

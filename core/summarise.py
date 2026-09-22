@@ -900,9 +900,25 @@ def extract_resource(resource: Resource) -> Extraction:
     return source_identity(resource)[0]
 
 
-async def get_summary(db: AsyncSession, resource_id: int) -> Optional[Summary]:
+async def get_summary(db: AsyncSession, resource: Resource) -> Optional[Summary]:
+    """The summary for this document, resolved by **content** first.
+
+    Summaries are cached by file hash, so the same PDF uploaded twice (or re-uploaded
+    under a new id) must resolve to the same notes. Looking up by `resource_id` alone
+    returned nothing for the second copy — the vault card then reported "no summary"
+    for a document that was already summarised.
+    """
+    try:
+        digest = source_identity(resource)[1]
+    except ExtractionError:
+        digest = ""
+    if digest:
+        row = (await db.execute(
+            select(Summary).where(Summary.file_hash == digest))).scalars().first()
+        if row is not None:
+            return row
     return (await db.execute(
-        select(Summary).where(Summary.resource_id == resource_id).order_by(Summary.id.desc())
+        select(Summary).where(Summary.resource_id == resource.id).order_by(Summary.id.desc())
     )).scalars().first()
 
 
@@ -923,16 +939,37 @@ async def get_or_create_summary(db: AsyncSession, resource: Resource, *, depth: 
             if summary is None:                       # pragma: no cover - defensive
                 raise
         await db.refresh(summary)
-    elif summary.depth != depth and summary.status not in ("running", "pending"):
-        # A different depth was requested for an already-summarised document.
-        summary.depth = depth
-        summary.status = "pending"
-        summary.notes_json = ""
-        summary.sections_done = 0
-        for row in (await db.execute(
-                select(SummarySection).where(SummarySection.summary_id == summary.id))).scalars().all():
-            await db.delete(row)
-        await db.commit()
+    else:
+        # Same content as an existing summary — it *is* this document's summary.
+        # The two adjustments below are independent: an identical file re-uploaded
+        # under a new resource id can also be asked for at a different depth, and
+        # chaining them as elif meant the rebuild was skipped and the previous
+        # depth's notes were served from cache.
+        changed = False
+        if summary.resource_id != resource.id:
+            summary.resource_id = resource.id       # keep per-resource lookups true
+            changed = True
+        if summary.depth != depth and summary.status not in ("running", "pending"):
+            # The plan (which sections to expand) depends on the depth, so it has to be
+            # rebuilt: clearing outline_json is what forces the planning stage to run
+            # again. Without it the pipeline would find no pending sections and
+            # assemble *empty* notes.
+            summary.depth = depth
+            summary.status = "pending"
+            summary.notes_json = ""
+            summary.outline_json = ""
+            summary.warnings_json = "[]"
+            summary.error = ""
+            summary.sections_done = 0
+            summary.sections_total = 0
+            summary.sections_failed = 0
+            summary.lease_until = None
+            for row in (await db.execute(
+                    select(SummarySection).where(SummarySection.summary_id == summary.id))).scalars().all():
+                await db.delete(row)
+            changed = True
+        if changed:
+            await db.commit()
     return summary
 
 
