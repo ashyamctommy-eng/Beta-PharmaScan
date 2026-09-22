@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from api.admin_routes import router as admin_router
 from api.routes import router as api_router
 from api.summary_routes import router as summary_router
-from core.config import settings
+from core.config import settings, startup_report
 from core.database import init_db
 
 
@@ -59,6 +59,12 @@ def configure_logging() -> None:
     except Exception:  # noqa: BLE001 - an unwritable directory must not stop the app
         logging.getLogger(__name__).warning("Could not open app.log for writing")
     root.setLevel(level)
+    # Some hosts and process managers configure the root logger at WARNING or higher. The
+    # startup report is the operator's only feedback on a host configured by pasting
+    # variables, so pin this logger to INFO. (Note: it is emitted from the ASGI lifespan,
+    # so it appears under uvicorn/gunicorn-as-ASGI — the Dockerfile path — but not under a
+    # bare WSGI bridge such as Passenger, which never runs the lifespan.)
+    logging.getLogger("main").setLevel(logging.INFO)
 
 
 configure_logging()
@@ -66,7 +72,14 @@ configure_logging()
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise the database schema on startup."""
+    """Initialise the database schema on startup, and say what was detected.
+
+    The report matters on a host where the deployment is configured by pasting variables:
+    it prints, in the host's log view, what the app worked out (database, where documents
+    go, pooling, provider) and exactly which variables are still missing. Otherwise the only
+    feedback is a failed request later.
+    """
+    logging.getLogger(__name__).info("\n%s", startup_report(settings))
     await init_db()
     yield
 

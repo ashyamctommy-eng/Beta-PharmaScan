@@ -1,135 +1,151 @@
-# Deploy on Railway — everything on Railway
+# Deploy on Railway
 
-One project, one service, one volume. No external database, no second host, no object
-storage: the SQLite database and the uploaded documents both live on a Railway volume.
-
-## 1. Your plan, and what changes when it does
-
-Railway's trial is **one-time: $5 of credit, valid for up to 30 days**, and it **expires in 30
-days whether or not you spend it**. When 30 days pass or the $5 is spent, the account
-**automatically reverts to the Free plan: $1 of credit per month**, which does not roll over.
-
-| | Trial | After it reverts (Free) |
-|---|---|---|
-| Credit | **$5, one-time, expires after 30 days** | **$1 per month** |
-| Limits | 1 GB RAM, **shared** vCPU, 5 services/project, **3 volumes** | 0.5 GB RAM, 1 vCPU, 1 replica, **1 volume** |
-| Volume size | 0.5 GB | 0.5 GB |
-| Always-on app | ~$2–4/month — fits in the $5 | more than the credit → **the service must sleep** |
-
-Usage prices are the same on both: RAM **$10/GB/month**, CPU **$20/vCPU/month**, volume
-**$0.15/GB/month** (0.5 GB ≈ $0.08/month), egress $0.05/GB.
-
-**Why bother with the sleeping settings now?** Because the switch is automatic and unattended:
-an always-on service stops when the trial ends. Set it up once and that moment passes quietly.
-During the trial you can leave Serverless off if you prefer instant responses.
-
-## 2. The architecture
+**The short version:** connect the repository, add either a volume or a PostgreSQL database,
+paste four variables, done. The app detects everything else — the database, where documents go,
+how connections are pooled, and which AI provider your key belongs to.
 
 ```
-Railway project
-└── service: pharmascan  (built from this repo's Dockerfile)
-    ├── /app                     ← the code, wiped and rebuilt on every deploy
-    └── /app/data  ← VOLUME      ← pharmascan.db + uploaded_notes/ + app.log
+1. New Project  →  Deploy from GitHub repo
+2. Add ONE of:  a volume mounted at /app/data     (cheapest)
+                a PostgreSQL service              (easiest, has backups)
+3. Paste:       GROQ_API_KEY, ADMIN_USERNAME, ADMIN_PASSWORD, ACCESS_CODE
+4. Generate a domain, enable Serverless. Done.
 ```
 
-Set **`DATA_DIR=/app/data`** and mount the volume at **`/app/data`**. That one variable moves the
-SQLite database, the uploaded documents *and* the log together. Without it the app writes beside
-its code, and every redeploy quietly returns an empty vault.
+---
 
-Mount the volume at `/app/data`, **not at `/app`**: a mount at `/app` would shadow the
-application code itself.
-
-## 3. Deploy
-
-1. **Push this code to your repository** (it is on GitHub already).
-2. Railway → **New Project → Deploy from GitHub repo** → pick the repository. Railway finds the
-   `Dockerfile` and builds with it; there is no config file to add. (I deliberately ship no
-   `railway.json`: Railway deprecated Config-as-Code in favour of Infrastructure-as-Code, and it
-   discovers the Dockerfile on its own.)
-3. **Attach the volume**: service → right-click → **Attach Volume** → mount path **`/app/data`**.
-4. **Variables** (service → Variables):
+## 1. The four variables you actually have to set
 
 ```dotenv
-DATA_DIR=/app/data
-STORAGE_BACKEND=disk
-GROQ_API_KEY=sk-or-v1-...
-GROQ_BASE_URL=https://openrouter.ai/api/v1
-GROQ_MODEL=openai/gpt-oss-20b
-GROQ_MAP_MODEL=openai/gpt-oss-20b
-GROQ_SUMMARY_MODEL=openai/gpt-oss-20b
-ADMIN_USERNAME=Poriotke
-ADMIN_PASSWORD=<choose a password>
-ACCESS_CODE=<a code your class can remember>
-MAX_UPLOAD_SIZE_MB=25
+GROQ_API_KEY=sk-or-v1-...            # your Groq (gsk_...) or OpenRouter (sk-or-v1-...) key
+ADMIN_USERNAME=Poriotke              # who signs in at /admin
+ADMIN_PASSWORD=<choose a long one>   # without this the panel stays closed
+ACCESS_CODE=<a code your class can remember>   # without this the AI features are open to anyone
 ```
 
-5. **Generate a domain**: service → Settings → Networking → **Generate Domain**.
-6. **Serverless** (optional but recommended — see §1): service → Settings → **Serverless**.
-   With SQLite on a volume there is no outbound database traffic, so the service sleeps cleanly;
-   the only outbound traffic is the AI call itself.
+That is the whole configuration. There is no `DATA_DIR`, no `STORAGE_BACKEND`, no
+`DB_POOL_MODE`, no model list to fill in.
 
-## 4. Verify
+## 2. What the app works out for itself
+
+| Setting | Detected from | Override with |
+|---|---|---|
+| Where the app's files live | `RAILWAY_VOLUME_MOUNT_PATH` — set automatically when you attach a volume (falls back to a mounted `/app/data`, else beside the code) | `DATA_DIR` |
+| Database | `DATABASE_PRIVATE_URL` / `DATABASE_URL` / `POSTGRES_URL`, or the `PG*` parts — whatever Railway injects for a PostgreSQL service | `DATABASE_URL` |
+| Where documents go | a volume → the volume; otherwise a managed database → the database; otherwise local disk | `STORAGE_BACKEND` |
+| Connection pooling | being on Railway → one connection per request, so an idle service can sleep | `DB_POOL_MODE` |
+| AI provider | your key's prefix: `sk-or-` → OpenRouter, `gsk_` → Groq | `GROQ_BASE_URL` |
+| Models | an OpenRouter key → `openai/gpt-oss-20b` (verified, ~$0.0008 per 6-page summary) | `GROQ_MODEL`, `GROQ_MAP_MODEL`, `GROQ_SUMMARY_MODEL` |
+
+**Nothing here overrules you.** Every value above is only a default: if you set the variable
+yourself, that wins.
+
+## 3. Pick one: volume or database
+
+| | **Volume** (recommended) | **Railway PostgreSQL** |
+|---|---|---|
+| Extra clicks | attach a volume at `/app/data` | add a PostgreSQL service |
+| Where state lives | SQLite + documents on the volume | everything inside the database |
+| Cost | $0.15/GB/month — about **$0.08/month** for 0.5 GB | the database service **runs continuously**, so it spends credit too |
+| Size limit | 0.5 GB on Trial/Free, 5 GB on Hobby | small on free tiers, grows on paid |
+| Backups | Railway volume backups (manual + automated) | point-in-time recovery |
+| Notes | brief pause on each redeploy (Railway won't have two deployments on one volume) | documents inside the database, so the vault grows the database |
+
+On the free plan's $1/month the **volume is the cheaper choice** because the database service
+never sleeps. Either way, no code changes and no variables to set — `storage` and `pooling`
+follow whichever you added.
+
+## 4. Read the startup report
+
+Every deploy logs what it worked out, and what is still missing. Railway → **Logs**:
+
+```
+PharmaScanKE is starting — configuration detected from the environment:
+  Data directory : /app/data   (volume detected — database, uploads and log live here)
+  Database       : SQLite file (pharmascan.db)
+  Documents      : on the volume   (STORAGE_BACKEND=disk)
+  Connections    : one per request — lets the host sleep   (DB_POOL_MODE=null)
+  AI             : OpenRouter key sk-or-v1-a…cdef · model openai/gpt-oss-20b
+  Admin panel    : enabled for 'Poriotke'
+  Student access : code set — students unlock once
+  Fix these     :
+      - ACCESS_CODE is not set: the AI features are open to anyone with the link
+```
+
+If something is wrong later, start here — it answers most questions without reading any other
+documentation. (It is emitted from the ASGI startup path, which is what the Dockerfile uses.)
+
+## 5. Verify
 
 | Check | Expected |
 |---|---|
 | The app URL loads | the landing page |
-| `/api/notes` | `{"total":0,"items":[]}` on a fresh volume |
-| Upload a PDF → **Short notes** → **Generate** | real notes with page numbers |
+| `/api/notes` | `{"total":0,"items":[]}` on a fresh install |
 | `/admin` → sign in → **Test connection** | your key's models are listed |
-| **Redeploy** (Railway → Deploy → Redeploy), then reload | **the vault and your PDF are still there** ← the check that matters |
-| Railway → Usage | during the trial, well under $5/30 days |
+| Upload a PDF → **Short notes** → **Generate** | real notes with page numbers |
+| **Redeploy** (Deploy → Redeploy), then reload | **the vault and your document are still there** |
+| Railway → Usage | comfortably inside your credit |
 
-## 5. Traps
+The redeploy check is the one that matters: with a volume it proves the mount is right, with
+PostgreSQL it proves the app is using the database rather than the container's filesystem.
+
+## 6. Your plan, and what changes when it does
+
+The trial is **one-time: $5 of credit, valid for up to 30 days**, and it **expires after 30 days
+whether or not you spend it**. Then the account **automatically reverts to the Free plan: $1 of
+credit per month**, which does not roll over.
+
+| | Trial | After it reverts (Free) |
+|---|---|---|
+| Credit | $5, one-time | $1 per month |
+| Limits | 1 GB RAM, shared vCPU, 3 volumes | 0.5 GB RAM, 1 vCPU, 1 volume |
+| An always-on app | ~$2–4/month — fits in the $5 | more than the credit → **it must sleep** |
+
+Usage prices: RAM $10/GB/month, CPU $20/vCPU/month, volume $0.15/GB/month.
+
+That is why **Serverless** matters (Settings → Serverless): it sleeps the service after ~5–10
+minutes of no outbound traffic and wakes it on the next request. With SQLite on a volume there is
+no outbound database traffic at all, so it sleeps cleanly. Turn it on before the trial ends, not
+after — the revert is automatic and unattended.
+
+## 7. Traps
 
 | Symptom | Cause |
 |---|---|
-| Vault empty after a redeploy | no volume attached, or `DATA_DIR` not set — the data was written beside the code |
-| App fails to start after attaching a volume | the volume was mounted at `/app`, shadowing the code — use `/app/data` |
-| Permission errors writing to the volume | a non-root image UID; set `RAILWAY_RUN_UID=0` |
-| A minute of downtime on each redeploy | expected with a volume: Railway refuses to have two deployments mounted at once |
-| `429` from the AI | an OpenRouter `:free` model — use `openai/gpt-oss-20b` |
-| Network calls fail on the trial | **Limited Trial** (GitHub account unverified) restricts outbound access — check railway.com/verify |
-| Service stopped mid-month | the credit is spent; it resumes next cycle. On the trial, note that Railway **deletes trial volumes 30 days after the credits expire** — see §6 |
+| Vault empty after a redeploy | no volume and no database: documents went to the container filesystem. The startup report says so explicitly. |
+| App will not start after attaching a volume | the volume was mounted at `/app`, shadowing the code — mount it at `/app/data` |
+| Permission denied writing to the volume | non-root image UID — set `RAILWAY_RUN_UID=0` |
+| A pause on each redeploy | normal with a volume attached |
+| Never sleeps, credit drains | a healthcheck ping (leave the path unset), or a second service you added |
+| `502` on the first visit | the service was asleep — reload |
+| `429` from the AI | an OpenRouter `:free` model — the defaults avoid these |
+| Network calls fail on the trial | **Limited Trial** (unverified GitHub account) restricts outbound access — check railway.com/verify |
+| Stops mid-month | the credit is spent; it resumes next cycle. **Trial volumes are deleted 30 days after the credits expire.** |
 
-## 6. Backups (worth two minutes)
+## 8. Backups
 
-Everything is on the volume, so that volume is the app's only copy. Railway supports **manual and
-automated volume backups** (service → the volume → Backups), which keeps durability entirely
-inside Railway. Take a manual backup once the class vault is populated, and keep a copy of any
-export you make off-platform.
+With a volume, that volume is the only copy: use Railway's **manual and automated volume
+backups** (service → the volume → Backups), and keep an occasional copy off-platform. With
+Railway PostgreSQL you get point-in-time recovery instead.
 
-## 7. If you would rather use Railway's Postgres
-
-Railway's Postgres plugin works too, and the app supports it without changes:
-
-```dotenv
-DATABASE_URL=postgresql+asyncpg://...   # anything Railway gives you; the scheme is rewritten
-STORAGE_BACKEND=database                # documents in the database instead of the volume
-DB_POOL_MODE=null                        # lets the service sleep: an idle pool is outbound traffic
-```
-
-Honest trade-off: a Postgres service **runs continuously**, so it also spends credit — on the
-free plan's $1/month that is the difference between free and not. The volume path in §2 is
-cheaper and simpler; this one buys you point-in-time recovery and no size ceiling near 0.5 GB.
-
-## 8. When you outgrow free: Hobby, $5/month
+## 9. If you outgrow free: Hobby, $5/month
 
 Includes $5 of usage and a **5 GB volume** (resizable live, no downtime). Same project, same
-volume, nothing to migrate — the service just stops sleeping and gets faster. That is the honest
-recommendation once the class uses it daily; the free path is for getting it in front of students
-without spending anything.
+volume, nothing to migrate — the service simply stops sleeping and gets faster. The free path is
+for getting the app in front of students without spending anything.
 
-## 9. How this was verified
+## 10. How this was verified
 
-No Docker daemon exists in the environment this was built in, so the image was verified by doing
-exactly what it does, on a clean copy of the repo:
+No Docker daemon existed in the environment this was built in, so the image was verified by doing
+exactly what it does, on a clean copy of the repository:
 
-- `pip install -r requirements.txt` into a fresh virtualenv — completed, so `requirements.txt` is
-  complete for the container path;
-- the image's own command, `uvicorn main:app --host 0.0.0.0 --port $PORT`, started the app:
-  `/api/notes` → 200, `/` → 200;
-- the full 23-check HTTP suite passed against that build (**23/23**);
-- with `DATA_DIR` pointing at a directory standing in for the volume, the volume contained
-  `pharmascan.db`, `uploaded_notes/` (20 documents) and `app.log`;
-- the container was then killed and the image layer wiped (what a redeploy does): after restart
-  the vault was intact, the document bytes were **identical**, and `/admin` still answered.
+- `pip install -r requirements.txt` into a fresh virtualenv — completed, so the container's
+  dependency list is complete;
+- the image's own command, `uvicorn main:app --host 0.0.0.0 --port $PORT`, started the app;
+- **scenario A — only a volume attached** (`RAILWAY_VOLUME_MOUNT_PATH` set, nothing else):
+  the app used the volume for the database, documents *and* log, chose disk storage and per-request
+  connections, inferred OpenRouter from the key, and passed the 23-check HTTP suite;
+- **scenario B — only a PostgreSQL service added** (nothing about storage configured):
+  the app detected the database, switched documents into it, chose per-request connections, and
+  passed the 30-check summary suite with the documents confirmed as rows in PostgreSQL;
+- the app-level test suite: **140 tests**.

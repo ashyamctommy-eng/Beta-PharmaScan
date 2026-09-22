@@ -154,6 +154,171 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 
+# ── Host auto-detection ───────────────────────────────────────────────────────
+# The goal: on Railway (or any Docker host) the only thing the operator should have to
+# provide is the AI key and the admin credentials. Everything below is detected from the
+# environment, and every one of these can still be overridden explicitly — an explicit
+# setting always wins, because "provided" is checked before each default is applied.
+
+def provided_fields(cfg: "Settings") -> set:
+    """Names of the settings that came from the environment/.env rather than the defaults."""
+    return set(getattr(cfg, "model_fields_set", set()) or set())
+
+
+def on_railway(env: "os._Environ | dict | None" = None) -> bool:
+    env = os.environ if env is None else env
+    return any(env.get(name) for name in
+               ("RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_ENVIRONMENT_NAME"))
+
+
+def detect_volume_mount(env=None) -> str:
+    """The directory of an attached volume, or an empty string.
+
+    Railway sets RAILWAY_VOLUME_MOUNT_PATH when a volume is attached, so attaching a volume
+    is enough — no DATA_DIR needed. The mount-point probe is the fallback for other hosts.
+    """
+    env = os.environ if env is None else env
+    path = (env.get("RAILWAY_VOLUME_MOUNT_PATH") or "").strip()
+    if path:
+        return path
+    for candidate in ("/app/data", "/data"):
+        try:
+            if Path(candidate).is_dir() and os.path.ismount(candidate):
+                return candidate
+        except OSError:
+            continue
+    return ""
+
+
+def discover_database_url(env=None) -> str:
+    """A managed Postgres URL provided by the host, or an empty string.
+
+    Covers Railway (DATABASE_PRIVATE_URL / DATABASE_URL), Vercel-style POSTGRES_URL, and
+    the libpq PG* parts. The private URL is preferred on Railway: it is the internal
+    network, so it is faster and does not count as egress.
+    """
+    env = os.environ if env is None else env
+    for name in ("DATABASE_PRIVATE_URL", "DATABASE_URL", "POSTGRES_URL", "DATABASE_PUBLIC_URL"):
+        value = (env.get(name) or "").strip()
+        if value and value.startswith(("postgres://", "postgresql://")):
+            return value
+    if env.get("PGHOST") and env.get("PGDATABASE"):
+        user = env.get("PGUSER") or "postgres"
+        password = env.get("PGPASSWORD") or ""
+        port = env.get("PGPORT") or "5432"
+        credentials = f"{user}:{password}" if password else user
+        return f"postgresql://{credentials}@{env['PGHOST']}:{port}/{env['PGDATABASE']}"
+    return ""
+
+
+def is_postgres_url(url: str) -> bool:
+    return (url or "").strip().startswith(("postgres://", "postgresql://", "postgresql+asyncpg://"))
+
+
+def apply_smart_defaults(cfg: "Settings", provided: set, volume_mount: str = "") -> None:
+    """Fill in whatever the host can tell us, without overruling an explicit setting."""
+    # Database: use a managed Postgres the host injected, if there is one.
+    # An empty value counts as "not provided": a variable left blank in a dashboard should
+    # not shadow the database the host injected.
+    if "DATABASE_URL" not in provided or not (cfg.DATABASE_URL or "").strip():
+        discovered = discover_database_url()
+        if discovered:
+            cfg.DATABASE_URL = discovered
+
+    # Documents: an attached volume wins (it is the cheapest place to put them); otherwise a
+    # managed database keeps the app stateless. With neither, documents land on the container
+    # filesystem — which a redeploy wipes, so say so loudly rather than vaulting them quietly.
+    if "STORAGE_BACKEND" not in provided or not (cfg.STORAGE_BACKEND or "").strip():
+        cfg.STORAGE_BACKEND = "disk" if volume_mount else ("database" if is_postgres_url(cfg.DATABASE_URL) else "disk")
+
+    # Pooling: Railway decides a service is idle from its OUTBOUND traffic, so a pool of open
+    # database connections would keep it awake and spend the free credit.
+    if ("DB_POOL_MODE" not in provided or not (cfg.DB_POOL_MODE or "").strip()) and on_railway():
+        cfg.DB_POOL_MODE = "null"
+
+    # The AI provider can be inferred from the key itself.
+    key = (cfg.GROQ_API_KEY or "").strip()
+    openrouter = key.startswith("sk-or-")
+    if "GROQ_BASE_URL" not in provided and openrouter:
+        cfg.GROQ_BASE_URL = "https://openrouter.ai/api/v1"
+    using_openrouter = openrouter or "openrouter" in (cfg.GROQ_BASE_URL or "").lower()
+    if using_openrouter:
+        # Verified working with this provider at roughly $0.0008 per 6-page summary.
+        # The built-in Groq default has been dropped by Groq's free tier, so it is no
+        # default worth keeping when we know which provider we are talking to.
+        for field in ("GROQ_MODEL", "GROQ_MAP_MODEL", "GROQ_SUMMARY_MODEL"):
+            if field not in provided:
+                setattr(cfg, field, "openai/gpt-oss-20b")
+
+    # Whatever URL we ended up with, make it one asyncpg can open — here rather than only at
+    # import time, so every path through this function produces a usable setting.
+    cfg.DATABASE_URL = normalize_database_url(cfg.DATABASE_URL)
+
+
+def startup_report(cfg: "Settings") -> str:
+    """A short 'here is what I worked out, and what is still missing' block for the logs.
+
+    Every line answers a question the operator would otherwise ask after a failed request.
+    """
+    import logging
+
+    lines = ["PharmaScanKE is starting — configuration detected from the environment:"]
+
+    if cfg.DATA_DIR != cfg.BASE_DIR:
+        lines.append(f"  Data directory : {cfg.DATA_DIR}   (volume detected — database, uploads and log live here)")
+    else:
+        lines.append(f"  Data directory : {cfg.DATA_DIR}   (no volume attached)")
+
+    db = cfg.DATABASE_URL
+    if is_postgres_url(db) and db.startswith("postgresql+asyncpg://"):
+        # Show the host, never the password.
+        host = db.split("@")[-1].split("?")[0]
+        lines.append(f"  Database       : PostgreSQL @ {host}   (detected from the environment)")
+    else:
+        lines.append(f"  Database       : SQLite file ({Path(db.split('///')[-1]).name})")
+
+    if cfg.STORAGE_BACKEND == "disk":
+        where = "on the volume" if Path(cfg.DATA_DIR) != Path(cfg.BASE_DIR) else "beside the code (no volume)"
+    else:
+        where = "inside the database"
+    lines.append(f"  Documents      : {where}   (STORAGE_BACKEND={cfg.STORAGE_BACKEND})")
+    lines.append(f"  Connections    : {'one per request — lets the host sleep' if cfg.DB_POOL_MODE == 'null' else 'pooled'}"
+                 f"   (DB_POOL_MODE={cfg.DB_POOL_MODE})")
+
+    key = (cfg.GROQ_API_KEY or "").strip()
+    if not key:
+        lines.append("  AI             : NO API KEY — set GROQ_API_KEY (Groq gsk_… or OpenRouter sk-or-v1-…)")
+    else:
+        provider = "OpenRouter" if "openrouter" in (cfg.GROQ_BASE_URL or "").lower() else "Groq"
+        lines.append(f"  AI             : {provider} key {key[:10]}…{key[-4:]} · model {cfg.GROQ_MODEL}")
+
+    if cfg.ADMIN_PASSWORD_HASH:
+        lines.append(f"  Admin panel    : enabled for '{cfg.ADMIN_USERNAME}' (hashed password)")
+    elif cfg.ADMIN_PASSWORD:
+        lines.append(f"  Admin panel    : enabled for '{cfg.ADMIN_USERNAME}'")
+    else:
+        lines.append(f"  Admin panel    : CLOSED — set ADMIN_PASSWORD (user '{cfg.ADMIN_USERNAME}') to open /admin")
+
+    lines.append(f"  Student access : {'code set — students unlock once' if cfg.ACCESS_CODE else 'OPEN — anyone can use the AI features'}")
+
+    warnings = []
+    if not key:
+        warnings.append("GROQ_API_KEY is missing: /api/analyze and short notes return 503")
+    if not (cfg.ADMIN_PASSWORD or cfg.ADMIN_PASSWORD_HASH):
+        warnings.append("ADMIN_PASSWORD is missing: /admin cannot be opened")
+    if not cfg.ACCESS_CODE:
+        warnings.append("ACCESS_CODE is not set: the AI features are open to anyone with the link")
+    if cfg.STORAGE_BACKEND == "disk" and cfg.DATA_DIR == cfg.BASE_DIR:
+        warnings.append("no volume and no managed database: uploaded documents will be lost on the next redeploy")
+    if warnings:
+        lines.append("  Fix these     :")
+        lines.extend(f"      - {w}" for w in warnings)
+
+    if isinstance(logging.getLogger().handlers, list):
+        pass  # the caller does the logging; this function only builds the text
+    return "\n".join(lines)
+
+
 def apply_data_dir(cfg: "Settings") -> None:
     """Point the app's own files at DATA_DIR when it has been moved onto a volume.
 
@@ -173,7 +338,16 @@ def apply_data_dir(cfg: "Settings") -> None:
 
 
 settings = Settings()
+_provided = provided_fields(settings)
+
+# 1. Where the app's files live: an attached volume, if the host shows us one.
+_volume = detect_volume_mount()
+if "DATA_DIR" not in _provided and _volume:
+    settings.DATA_DIR = Path(_volume)
 apply_data_dir(settings)
+
+# 2. Everything else the host can tell us: the database, where documents go, pooling, provider.
+apply_smart_defaults(settings, _provided, _volume)
 
 # Applied here, once, so every consumer (the engine, cpanel_check.py, the admin panel)
 # sees the same working URL rather than each re-deriving it. A host-provided

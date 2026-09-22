@@ -68,8 +68,12 @@ button lists every model your key can see.
 
 ## Configuration
 
-All settings are environment variables (or entries in `.env`). The full annotated list lives in
-[`.env.example`](.env.example); the ones that matter most:
+All settings are environment variables (or entries in `.env`). On a managed host **most of them
+are inferred** — the database, `DATA_DIR`, `STORAGE_BACKEND`, `DB_POOL_MODE` and the AI provider
+are all detected (see RAILWAY-DEPLOY.md §2), and an explicit setting always wins. In practice you
+set the AI key, the admin credentials and the access code.
+
+The full annotated list lives in [`.env.example`](.env.example); the ones that matter most:
 
 ### Core
 
@@ -125,45 +129,44 @@ python -m core.auth check     # report how authentication is configured
 
 ## Deployment
 
-### Railway — everything on Railway (recommended)
+### Railway — about two minutes
 
-One project, one service, one volume. No external database or object storage.
+Connect the repository, add **one** of the two state options, paste **four** variables. The app
+works out the rest for itself: the database, where documents go, how connections are pooled and
+which AI provider your key belongs to.
 
 ```
-Railway project
-└── service: pharmascan  (built from this repo's Dockerfile)
-    ├── /app            ← the code; wiped and rebuilt on every deploy
-    └── /app/data  ← VOLUME  ← pharmascan.db + uploaded_notes/ + app.log
+1. New Project  →  Deploy from GitHub repo   (Railway finds the Dockerfile)
+2. Add ONE of:  a volume mounted at /app/data   (cheapest)
+                a PostgreSQL service            (easiest, includes backups)
+3. Variables:   GROQ_API_KEY, ADMIN_USERNAME, ADMIN_PASSWORD, ACCESS_CODE
+4. Generate a domain, then enable Serverless (Settings).
 ```
 
-1. **New Project → Deploy from GitHub repo** → pick this repository. Railway finds the
-   `Dockerfile` and builds with it.
-2. **Attach a volume** to the service, mounted at **`/app/data`**
-   (mounting it at `/app` would shadow the application code).
-3. **Variables** — `DATA_DIR=/app/data`, `STORAGE_BACKEND=disk`, plus your AI key, admin
-   credentials and access code:
+```dotenv
+GROQ_API_KEY=sk-or-v1-...            # Groq (gsk_...) or OpenRouter (sk-or-v1-...)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<choose a long one>
+ACCESS_CODE=<a code your class can remember>
+```
 
-   ```dotenv
-   DATA_DIR=/app/data
-   STORAGE_BACKEND=disk
-   GROQ_API_KEY=sk-or-v1-...
-   GROQ_BASE_URL=https://openrouter.ai/api/v1
-   GROQ_MODEL=openai/gpt-oss-20b
-   GROQ_MAP_MODEL=openai/gpt-oss-20b
-   GROQ_SUMMARY_MODEL=openai/gpt-oss-20b
-   ADMIN_USERNAME=admin
-   ADMIN_PASSWORD=<choose a long one>
-   ACCESS_CODE=<a code your class can remember>
-   MAX_UPLOAD_SIZE_MB=25
-   ```
+Nothing else is required — there is no `DATA_DIR`, `STORAGE_BACKEND` or `DB_POOL_MODE` to set.
+Every deploy logs what it detected and what is still missing, so on Railway open **Logs**:
 
-4. **Generate a domain**, then turn on **Serverless** (Settings) so an idle service stops
-   spending credit. Leave the healthcheck path unset — a periodic ping keeps it awake.
-5. **Verify:** upload a PDF → **Short notes** → **Generate**. Then redeploy and reload: the vault
-   and your document must still be there. That last check is what fails if `DATA_DIR` was
-   forgotten.
+```
+  Data directory : /app/data   (volume detected — database, uploads and log live here)
+  Documents      : on the volume   (STORAGE_BACKEND=disk)
+  Connections    : one per request — lets the host sleep   (DB_POOL_MODE=null)
+  AI             : OpenRouter key sk-or-v1-a…cdef · model openai/gpt-oss-20b
+  Fix these     : - ACCESS_CODE is not set: the AI features are open to anyone with the link
+```
 
-Full detail, the trial/free-plan timeline, backups and the traps: **[RAILWAY-DEPLOY.md](RAILWAY-DEPLOY.md)**.
+**Verify:** upload a PDF → **Short notes** → **Generate**, then **redeploy** and reload — the vault
+and your document must still be there. That last check proves the volume mount (or the database)
+is right; it is what fails if state ended up on the container's filesystem.
+
+Full detail — what is auto-detected, volume vs PostgreSQL, the trial → free timeline, backups and
+the traps: **[RAILWAY-DEPLOY.md](RAILWAY-DEPLOY.md)**.
 
 ### Other targets
 
@@ -217,8 +220,9 @@ pip install -r requirements-dev.txt      # fpdf2, for generating fixtures
 python -m unittest discover -s tests -t .
 ```
 
-118 tests: extraction (PDF/DOCX/PPTX), the summary pipeline and its caching and budgets,
-storage backends, auth and sessions, settings precedence, and database-URL normalisation.
+140 tests: extraction (PDF/DOCX/PPTX), the summary pipeline and its caching and budgets,
+storage backends, auth and sessions, settings precedence, database-URL normalisation, and host
+auto-detection (volume, injected database, pooling, provider inference).
 The HTTP suites used during development (`wsgi_smoke.py`, `summary_http_test.py`,
 `admin_http_test.py`) live outside the repository because they need a running server.
 
