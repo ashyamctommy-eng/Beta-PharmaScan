@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     GROQ_TEMPERATURE: float = 0.3
 
     class Config:
-        env_file = ".env"
+        # Absolute path: under Passenger/cPanel the process CWD is not the
+        # application root, so a relative ".env" would silently never load.
+        env_file = str(Path(__file__).resolve().parent.parent / ".env")
         env_file_encoding = "utf-8"
         extra = "ignore"
 
