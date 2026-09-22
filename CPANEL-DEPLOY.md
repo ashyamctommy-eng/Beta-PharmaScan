@@ -31,6 +31,9 @@ or *Python Selector* on Plesk/other panels). Then:
 | `core/config.py` | `.env` path is now **absolute** | The old relative `".env"` only loads when the working directory happens to be the app root. Under Passenger it may not be — the app then answers `503 GROQ_API_KEY environment variable is not set` while your `.env` sits right there. |
 | `requirements-cpanel.txt` | **new** | Adds `a2wsgi`; drops `uvicorn[standard]` (Passenger *is* the web server, and uvloop/httptools/watchfiles need a compiler when no wheel matches your Python). |
 | `cpanel_check.py` | **new** — pre-flight self-test | Turns "it 500s" into a named cause: Python version, `.env`, writable folders, schema, WAL, every route, and outbound HTTPS to `api.groq.com`. |
+| `core/extract.py`, `core/summarise.py`, `api/summary_routes.py`, `models/summary.py`, `templates/index.html` | **new** — “Short notes” from an uploaded PDF/DOCX/PPTX | Reads the document locally (free), maps its structure, then expands the sections that matter into exam-ready notes with page citations. See [PDF-SUMMARY.md](PDF-SUMMARY.md). Extraction libraries (`pypdf`, `python-docx`, `python-pptx`) are already in `requirements-cpanel.txt`. |
+| `tests/` | **new** — 37 tests | `python -m unittest discover -s tests -t .` runs the extraction and pipeline tests with no API key (the model is stubbed). PDF fixtures need `requirements-dev.txt`. |
+| `CPANEL-DEPLOY.md`, `PDF-SUMMARY.md` | **new** — docs | This file and the feature/cost guide. |
 | `.gitignore` | ignores `tmp/`, `stderr.log` | Passenger scratch files. |
 
 The two traps the entry point handles (both proven, not guessed):
@@ -148,6 +151,20 @@ Open your URL and check, in order:
 
 All five, on the same box, are what `cpanel_check.py` + local testing cover between them.
 
+Optional, but it proves the server can read documents before a student tries: open a PDF
+in the vault and press **Short notes**. The preview (structure, table of contents, token
+cost) is computed locally and needs no API calls at all — if that renders, extraction
+works on your host.
+
+You can also run the test suite on the server (the model is stubbed, so it needs no key):
+
+```bash
+cd ~/pharmascan
+python -m unittest discover -s tests -t .      # 23 tests need no PDF library
+pip install -r requirements-dev.txt            # optional: adds fpdf2, for the PDF fixtures
+python -m unittest discover -s tests -t .      # all 37
+```
+
 ---
 
 ## 3. Troubleshooting
@@ -163,6 +180,10 @@ All five, on the same box, are what `cpanel_check.py` + local testing cover betw
 | `database is locked` under load | Several Passenger processes writing SQLite at once | Restart with fewer processes (`PassengerMaxPoolSize 2` in the docroot `.htaccess`); or move to MySQL/MariaDB. |
 | `pip install` tries to compile `greenlet` | No wheel for that Python version | Pick Python 3.10–3.13, or ask your host to install `gcc`/`python3-devel`. |
 | Nothing helps | — | Read the real error: cPanel → **Metrics → Errors**, or the Python App's log viewer. Passenger prints tracebacks there, and `~/pharmascan/stderr.log` if present. |
+| “Short notes” → **Groq rejected the server's API key (HTTP 401)** | The key on the server is wrong, revoked, or was pasted with whitespace | Fix `GROQ_API_KEY` in `.env`, `touch tmp/restart.txt`. Keys are invalidated when regenerated in the Groq console. |
+| “Short notes” → **Groq is rate-limiting this key** | Free tier is ~8,000 tokens/minute | Nothing is lost: press **Continue**. Finished sections are saved. Bigger documents: use the **brief** depth, or raise `SUMMARISE_DAILY_TOKEN_BUDGET` / upgrade the Groq plan. |
+| “Short notes” → **no readable text layer** | The PDF is a scan or a photo — there is no text to read | Not fixable on shared hosting (no OCR). Upload a text-based PDF, or paste the text into the analysis box. |
+| Notes cost more tokens than expected | Depth is `full`, or the document is large | The preview quotes the cost of each depth before generating; `brief` skips section expansion entirely. Results are cached per file, so regenerating the same file is free. |
 
 ---
 

@@ -195,6 +195,31 @@
     /* ── View modal body ── */
     #view-modal-body { max-height: 70vh; overflow-y: auto; }
 
+    /* ── Short-notes modal ── */
+    #summary-modal { max-height: none; }
+    #summary-body { max-height: 68vh; overflow-y: auto; }
+    .note-bullet { display: flex; gap: .5rem; align-items: flex-start; }
+    .note-bullet::before { content: '•'; color: #0d9488; font-weight: 700; line-height: 1.5; }
+    .page-chip {
+      display: inline-flex; align-items: center; flex-shrink: 0;
+      font-size: .6875rem; font-weight: 600; padding: .0625rem .375rem;
+      border-radius: .375rem; background: #f1f5f9; color: #475569;
+    }
+    #summary-progress-bar { transition: width .4s ease; }
+
+    /* Print: emit just the notes, on paper, without the app chrome. */
+    @media print {
+      body > *:not(#summary-modal) { display: none !important; }
+      #summary-modal {
+        position: static !important; display: block !important; padding: 0 !important;
+        background: none !important; overflow: visible !important; inset: auto !important;
+      }
+      #summary-modal > div { box-shadow: none !important; max-width: none !important; margin: 0 !important; border-radius: 0 !important; }
+      #summary-body { max-height: none !important; overflow: visible !important; }
+      .no-print { display: none !important; }
+      .note-bullet, .page-chip { break-inside: avoid; }
+    }
+
     /* Scrollbar thin */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #f1f5f9; }
@@ -592,6 +617,27 @@
 </footer>
 
 <!-- Toast -->
+<div id="summary-modal" class="hidden fixed inset-0 z-40 flex items-start justify-center p-4 sm:p-8 bg-black/40 backdrop-blur-sm overflow-y-auto">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl my-2">
+    <div class="flex items-start justify-between gap-4 p-5 border-b border-slate-100">
+      <div class="flex items-start gap-3 min-w-0">
+        <div class="w-10 h-10 bg-teal-50 rounded-xl flex items-center justify-center flex-shrink-0">
+          <svg class="w-5 h-5 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6M9 8h6M5 3h9l5 5v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1z" /></svg>
+        </div>
+        <div class="min-w-0">
+          <h3 class="text-slate-800 font-semibold">Short notes</h3>
+          <p id="summary-subtitle" class="text-slate-500 text-xs mt-0.5 truncate"></p>
+        </div>
+      </div>
+      <button id="summary-close" class="no-print text-slate-400 hover:text-slate-600 transition flex-shrink-0" aria-label="Close">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+      </button>
+    </div>
+    <div id="summary-body" class="p-5 space-y-4"></div>
+    <div id="summary-footer" class="no-print p-5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3"></div>
+  </div>
+</div>
+
 <div id="toast" role="alert" class="hidden fixed bottom-6 right-6 max-w-xs z-50 rounded-xl shadow-lg px-4 py-3 flex items-center gap-3 text-sm font-medium">
   <svg id="toast-icon" class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"></svg>
   <span id="toast-msg"></span>
@@ -853,6 +899,11 @@
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
             View / Download
           </a>
+          <button class="summarise-btn inline-flex items-center gap-1 text-xs font-semibold text-teal-700 hover:text-teal-900 transition-colors"
+            data-id="${note.id}" data-title="${esc(note.title)}" title="Generate short notes from this document">
+            <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6M9 8h6M5 3h9l5 5v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1z" /></svg>
+            Short notes
+          </button>
           <button class="delete-btn inline-flex items-center gap-1 text-xs font-medium text-slate-400 hover:text-red-500 transition-colors"
             data-id="${note.id}" data-title="${esc(note.title)}">
             <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -867,6 +918,9 @@
         $('confirm-msg').textContent = `"${btn.dataset.title}" will be permanently removed.`;
         $('confirm-modal').classList.remove('hidden');
       });
+    });
+    document.querySelectorAll('.summarise-btn').forEach(btn => {
+      btn.addEventListener('click', () => openSummary(parseInt(btn.dataset.id, 10), btn.dataset.title));
     });
   }
 
@@ -1171,6 +1225,323 @@
 
   /* ── Saved search filter ─────────────────────────────── */
   $('saved-search').addEventListener('input', renderSavedCards);
+
+  /* ── Short notes (document summariser) ───────────────
+     Three states: a FREE preview (structure + honest token cost, computed by the
+     server with no AI), a bounded tick loop while sections are expanded, and the
+     rendered notes. Nothing is spent until Generate is pressed, and every
+     finished section is saved server-side, so a stalled run resumes. */
+  let summaryId      = null;
+  let summaryDepth   = 'standard';
+  let summaryRunning = false;
+  let currentNotes   = null;
+
+  const DEPTH_HINT = {
+    brief:    'Study map only — headings, gist and the 5 key facts. Cheapest.',
+    standard: 'Expands the sections that matter most for exams.',
+    full:     'Expands every section. Most thorough, most tokens.'
+  };
+
+  const sleep = ms => new Promise(res => setTimeout(res, ms));
+  const nf    = n => Number(n || 0).toLocaleString('en-KE');
+  function stripCitation(text) {
+    return String(text || '').replace(/\s*\((?:p|pp|page)\.?\s*\d+(?:\s*[-–]\s*\d+)?\)\s*$/i, '').trim();
+  }
+
+  function openSummary(resourceId, title) {
+    summaryId = resourceId; summaryDepth = 'standard'; currentNotes = null;
+    $('summary-subtitle').textContent = title || '';
+    $('summary-modal').classList.remove('hidden');
+    $('summary-body').innerHTML = '<p class="text-slate-500 text-sm">Reading the document…</p>';
+    $('summary-footer').innerHTML = '';
+    fetch(`/api/summarise/${resourceId}/preview`)
+      .then(async r => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || 'Could not read this document.');
+        return d;
+      })
+      .then(p => {
+        renderSummaryPreview(p);
+        if (p.existing && p.existing.has_notes) loadCachedNotes();
+      })
+      .catch(err => renderSummaryError(err.message));
+  }
+
+  function closeSummary() {
+    $('summary-modal').classList.add('hidden');
+  }
+
+  function summaryStat(label, value, tone = 'slate') {
+    const tones = { slate:'text-slate-800', teal:'text-teal-700', amber:'text-amber-700', red:'text-red-600' };
+    return `<div class="rounded-xl border border-slate-200 px-3 py-2">
+      <p class="text-[11px] uppercase tracking-wide text-slate-400">${esc(label)}</p>
+      <p class="text-sm font-semibold ${tones[tone] || tones.slate}">${esc(String(value))}</p></div>`;
+  }
+
+  function renderSummaryPreview(p) {
+    const sectionCount = (p.sections || []).length;
+    let html = '';
+
+    if (p.scanned) {
+      html += `<div class="bg-amber-50 border border-amber-200 rounded-xl p-4">
+        <p class="text-amber-800 text-sm font-semibold">No readable text layer</p>
+        <p class="text-amber-700 text-xs mt-1">${esc((p.warnings || [])[0] || 'This looks like a scanned document.')}</p>
+      </div>`;
+    } else {
+      html += `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        ${summaryStat('Pages', p.pages, 'teal')}
+        ${summaryStat('Sections found', sectionCount)}
+        ${summaryStat('Text (approx tokens)', nf(p.tokens))}
+        ${summaryStat('Structure', p.has_structure ? 'Headings detected' : 'Split by length')}
+      </div>`;
+    }
+
+    if (!p.scanned) {
+      html += `<div>
+        <p class="text-sm font-semibold text-slate-700 mb-2">How deep should the notes go?</p>
+        <div class="space-y-2">`;
+      ['brief','standard','full'].forEach(depth => {
+        const cost = (p.cost_by_depth || {})[depth] || 0;
+        html += `<label class="flex items-start gap-3 rounded-xl border border-slate-200 hover:border-teal-300 px-3 py-2.5 cursor-pointer transition">
+          <input type="radio" name="summary-depth" value="${depth}" ${depth === 'standard' ? 'checked' : ''} class="mt-1 accent-teal-600">
+          <span class="flex-1">
+            <span class="flex items-center justify-between gap-2">
+              <span class="text-sm font-semibold text-slate-700 capitalize">${depth}</span>
+              <span class="text-[11px] font-medium text-slate-500">≈ ${nf(cost)} tokens</span>
+            </span>
+            <span class="block text-xs text-slate-500 mt-0.5">${esc(DEPTH_HINT[depth])}</span>
+          </span></label>`;
+      });
+      html += `</div><p class="text-[11px] text-slate-400 mt-2">Costs are upper-bound estimates. Every finished section is saved, so a run stopped by a rate limit resumes without redoing work.</p></div>`;
+
+      if (sectionCount) {
+        html += `<div>
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-sm font-semibold text-slate-700">What is in this document</p>
+            <span class="text-[11px] text-slate-400">free — computed on the server</span>
+          </div>
+          <div class="rounded-xl border border-slate-200 divide-y divide-slate-100">${p.sections.slice(0, 8).map(s => `
+            <div class="flex items-start justify-between gap-3 px-3 py-2">
+              <span class="text-xs text-slate-600 leading-snug">${esc(s.heading)}</span>
+              <span class="page-chip">p.${esc(String(s.page))}</span>
+            </div>`).join('')}${sectionCount > 8 ? `
+            <div class="px-3 py-2 text-xs text-slate-400">+ ${sectionCount - 8} more section(s)</div>` : ''}
+          </div></div>`;
+      }
+    }
+
+    if ((p.warnings || []).length) {
+      html += `<div class="bg-slate-50 border border-slate-200 rounded-xl p-3">
+        <p class="text-xs font-semibold text-slate-600 mb-1">What the reader noticed</p>
+        <ul class="space-y-1">${p.warnings.map(w => `<li class="text-xs text-slate-500">• ${esc(w)}</li>`).join('')}</ul>
+      </div>`;
+    }
+
+    $('summary-body').innerHTML = html;
+    document.querySelectorAll('input[name="summary-depth"]').forEach(input => {
+      input.addEventListener('change', () => { summaryDepth = input.value; });
+    });
+    summaryDepth = 'standard';
+
+    const cached = p.existing && p.existing.has_notes;
+    $('summary-footer').innerHTML = `
+      <span class="text-xs text-slate-400">${cached ? 'Notes for this exact file are already saved.' : ''}</span>
+      <span class="flex items-center gap-3">
+        <button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Close</button>
+        ${p.scanned ? '' : `<button id="summary-generate" class="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-lg transition shadow-sm">${cached ? 'Regenerate' : 'Generate notes'}</button>`}
+      </span>`;
+    $('summary-cancel').addEventListener('click', closeSummary);
+    const generate = $('summary-generate');
+    if (generate) generate.addEventListener('click', runSummary);
+  }
+
+  async function loadCachedNotes() {
+    try {
+      const r = await fetch(`/api/summarise/${summaryId}`);
+      const d = await r.json();
+      if (r.ok && d.notes) { currentNotes = d.notes; renderNotes(d.notes, d); }
+    } catch { /* preview stays visible */ }
+  }
+
+  function renderSummaryProgress(state) {
+    const total = state.sections_total || 0;
+    const done  = state.sections_done || 0;
+    const pct   = total ? Math.round((done / total) * 100) : (state.status === 'running' ? 5 : 0);
+    const stalled = state.status === 'rate_limited' || state.status === 'budget_exhausted';
+    const sections = state.sections || [];
+    $('summary-body').innerHTML = `
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <p class="text-sm font-semibold text-slate-700">${stalled ? 'Paused' : 'Writing your notes…'}</p>
+          <span class="text-xs text-slate-500">${total ? `${done} of ${total} sections` : 'starting'}</span>
+        </div>
+        <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div id="summary-progress-bar" class="h-full bg-teal-500" style="width:${pct}%"></div>
+        </div>
+        ${state.message ? `<p class="text-xs ${stalled ? 'text-amber-700' : 'text-slate-500'} mt-2">${esc(state.message)}</p>` : ''}
+        ${state.tokens_spent ? `<p class="text-[11px] text-slate-400 mt-1">${nf(state.tokens_spent)} tokens spent so far</p>` : ''}
+      </div>
+      ${sections.length ? `<div class="rounded-xl border border-slate-200 divide-y divide-slate-100">${sections.map(s => `
+        <div class="flex items-center justify-between gap-3 px-3 py-2">
+          <span class="text-xs text-slate-600 truncate">${esc(s.heading)}</span>
+          <span class="page-chip">${s.status === 'done' ? 'done' : s.status === 'pending' ? 'p.' + esc(String(s.page)) : esc(s.status)}</span>
+        </div>`).join('')}</div>` : ''}`;
+    $('summary-footer').innerHTML = stalled
+      ? `<span class="text-xs text-slate-400">Progress is saved — nothing is lost.</span>
+         <span class="flex items-center gap-3">
+           <button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Close</button>
+           <button id="summary-continue" class="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-lg transition shadow-sm">Continue</button>
+         </span>`
+      : `<span class="text-xs text-slate-400">Keep this window open.</span>
+         <button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Stop</button>`;
+    $('summary-cancel').addEventListener('click', closeSummary);
+    const cont = $('summary-continue');
+    if (cont) cont.addEventListener('click', runSummary);
+  }
+
+  async function runSummary() {
+    if (summaryRunning) return;
+    summaryRunning = true;
+    renderSummaryProgress({ status:'running', sections_done:0, sections_total:0, message:'Building the study map…' });
+    try {
+      for (let tick = 0; tick < 60; tick++) {
+        const r = await fetch(`/api/summarise/${summaryId}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ depth: summaryDepth })
+        });
+        const d = await r.json();
+        if (!r.ok) { renderSummaryError(d.detail || 'The summary could not be generated.'); break; }
+        if (d.notes) { currentNotes = d.notes; renderNotes(d.notes, d); break; }
+        if (d.status === 'failed') { renderSummaryError(d.message || 'The summary failed.'); break; }
+        renderSummaryProgress(d);
+        if (d.status === 'running' || d.status === 'pending') { await sleep(500); continue; }
+        break;
+      }
+    } catch (e) {
+      renderSummaryError('Network error. Your progress is saved — press Continue to resume.');
+    } finally {
+      summaryRunning = false;
+    }
+  }
+
+  function renderNotes(notes, meta) {
+    const topics = notes.topics || [];
+    const chip = page => `<span class="page-chip">p.${esc(String(page))}</span>`;
+    let html = `<div class="space-y-2">
+      <h4 class="text-slate-800 font-semibold text-base leading-snug">${esc(notes.title || '')}</h4>
+      <p class="text-xs text-slate-400">${nf(notes.pages)} pages · ${topics.length} section(s) · ${nf((meta && meta.tokens_spent) || 0)} tokens · ${esc(notes.model || '')} · ${esc((notes.generated_at || '').slice(0, 16).replace('T', ' '))}</p>
+    </div>`;
+
+    if ((notes.remember_5 || []).length) {
+      html += `<div class="bg-teal-50 border border-teal-200 rounded-xl p-4">
+        <p class="text-teal-800 text-sm font-semibold mb-2">If you remember only five things</p>
+        <ol class="space-y-1.5">${notes.remember_5.map((item, i) => `
+          <li class="text-sm text-teal-900 flex gap-2"><span class="font-bold">${i + 1}.</span><span>${esc(stripCitation(item))}</span></li>`).join('')}</ol>
+      </div>`;
+    }
+
+    if ((notes.exam_traps || []).length) {
+      html += `<div class="bg-amber-50 border border-amber-200 rounded-xl p-4">
+        <p class="text-amber-800 text-sm font-semibold mb-2">Common exam traps</p>
+        <ul class="space-y-1.5">${notes.exam_traps.map(t => `<li class="text-sm text-amber-900">• ${esc(stripCitation(t))}</li>`).join('')}</ul>
+      </div>`;
+    }
+
+    topics.forEach(topic => {
+      html += `<div class="rounded-xl border border-slate-200 p-4 space-y-3">
+        <div class="flex items-start justify-between gap-3">
+          <h5 class="text-slate-800 font-semibold text-sm leading-snug">${esc(topic.heading)}</h5>
+          ${chip(topic.page)}
+        </div>`;
+      if ((topic.bullets || []).length) {
+        html += `<ul class="space-y-1.5">${topic.bullets.map(b => `
+          <li class="note-bullet"><span class="text-sm text-slate-700 flex-1">${esc(stripCitation(b.text || b))}</span>${chip(b.page || topic.page)}</li>`).join('')}</ul>`;
+      }
+      if ((topic.drug_table || []).length) {
+        html += `<div class="overflow-x-auto"><table class="w-full text-xs border border-slate-200 rounded-lg overflow-hidden">
+          <thead class="bg-slate-50 text-slate-500"><tr><th class="text-left px-2 py-1.5 font-semibold">Drug</th><th class="text-left px-2 py-1.5 font-semibold">Class</th><th class="text-left px-2 py-1.5 font-semibold">Mechanism</th><th class="text-left px-2 py-1.5 font-semibold">Note</th></tr></thead>
+          <tbody>${topic.drug_table.map(row => `<tr class="border-t border-slate-100">
+            <td class="px-2 py-1.5 text-slate-700 font-medium">${esc(row.name || '')}</td>
+            <td class="px-2 py-1.5 text-slate-600">${esc(row.class || '')}</td>
+            <td class="px-2 py-1.5 text-slate-600">${esc(row.mechanism || '')}</td>
+            <td class="px-2 py-1.5 text-slate-600">${esc(row.note || '')}</td></tr>`).join('')}</tbody>
+        </table></div>`;
+      }
+      if ((topic.key_terms || []).length) {
+        html += `<div class="flex flex-wrap gap-1.5">${topic.key_terms.map(term => `<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">${esc(term)}</span>`).join('')}</div>`;
+      }
+      if (topic.mnemonic) {
+        html += `<p class="text-xs text-slate-600 bg-violet-50 border border-violet-100 rounded-lg px-3 py-2"><span class="font-semibold text-violet-700">Mnemonic:</span> ${esc(topic.mnemonic)}</p>`;
+      }
+      if ((topic.flags || []).length && topic.flags.length) {
+        html += `<p class="text-[11px] text-slate-400">${topic.flags.map(esc).join(' · ')}</p>`;
+      }
+      html += `</div>`;
+    });
+
+    const warnings = (notes.warnings || []).filter(Boolean);
+    if (warnings.length) {
+      html += `<div class="bg-slate-50 border border-slate-200 rounded-xl p-3">
+        <p class="text-xs font-semibold text-slate-600 mb-1">How to read this</p>
+        <ul class="space-y-1">${warnings.map(w => `<li class="text-xs text-slate-500">• ${esc(w)}</li>`).join('')}</ul>
+      </div>`;
+    }
+
+    $('summary-body').innerHTML = html;
+    $('summary-footer').innerHTML = `
+      <span class="text-xs text-slate-400">Every bullet keeps its page number — check it against the original.</span>
+      <span class="flex items-center gap-2">
+        <button id="summary-copy" class="px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Copy</button>
+        <button id="summary-print" class="px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Print / PDF</button>
+        <button id="summary-regenerate" class="px-3 py-2 text-sm font-medium text-teal-700 bg-teal-50 hover:bg-teal-100 rounded-lg transition">Regenerate</button>
+        <button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-lg transition shadow-sm">Done</button>
+      </span>`;
+    $('summary-cancel').addEventListener('click', closeSummary);
+    $('summary-print').addEventListener('click', () => window.print());
+    $('summary-copy').addEventListener('click', () => {
+      navigator.clipboard.writeText(notesToText(notes))
+        .then(() => showToast('Notes copied to clipboard!', 'info'))
+        .catch(() => showToast('Could not copy — select the text manually.', 'error'));
+    });
+    $('summary-regenerate').addEventListener('click', () => {
+      fetch(`/api/summarise/${summaryId}/preview`).then(r => r.json()).then(p => {
+        $('summary-body').innerHTML = ''; renderSummaryPreview(p);
+        renderSummaryProgress({ status:'running', sections_done:0, sections_total:0, message:'Restarting at the current depth…' });
+        runSummary();
+      });
+    });
+  }
+
+  function renderSummaryError(message) {
+    $('summary-body').innerHTML = `<div class="bg-red-50 border border-red-200 rounded-xl p-4">
+      <p class="text-red-800 text-sm font-semibold">Could not generate notes</p>
+      <p class="text-red-700 text-xs mt-1">${esc(message)}</p>
+    </div>`;
+    $('summary-footer').innerHTML = `<span></span><button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Close</button>`;
+    $('summary-cancel').addEventListener('click', closeSummary);
+  }
+
+  function notesToText(notes) {
+    const lines = [`# ${notes.title || 'Short notes'}`, ``, `Source: ${notes.file_name} (${notes.pages} pages)`, ``];
+    if ((notes.remember_5 || []).length) {
+      lines.push('## Remember these five', ...notes.remember_5.map((t, i) => `${i + 1}. ${stripCitation(t)}`), ``);
+    }
+    (notes.topics || []).forEach(topic => {
+      lines.push(`## ${topic.heading} (p.${topic.page})`);
+      (topic.bullets || []).forEach(b => lines.push(`- ${stripCitation(b.text || b)} (p.${b.page || topic.page})`));
+      (topic.drug_table || []).forEach(row => lines.push(`- ${row.name} — ${row.class} — ${row.mechanism} ${row.note || ''}`.trim()));
+      if (topic.key_terms && topic.key_terms.length) lines.push(`Key terms: ${topic.key_terms.join(', ')}`);
+      if (topic.mnemonic) lines.push(`Mnemonic: ${topic.mnemonic}`);
+      lines.push('');
+    });
+    if ((notes.exam_traps || []).length) {
+      lines.push('## Common exam traps', ...notes.exam_traps.map(t => `- ${stripCitation(t)}`), '');
+    }
+    return lines.join('\n');
+  }
+
+  $('summary-close').addEventListener('click', closeSummary);
+  $('summary-modal').addEventListener('click', e => { if (e.target === $('summary-modal')) closeSummary(); });
 
   /* ── Init ───────────────────────────────────────────── */
   Promise.all([loadNotes(), loadStats()]);

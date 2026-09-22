@@ -39,9 +39,28 @@ class Settings(BaseSettings):
 
     # ── AI / Groq ─────────────────────────────────────────────────────────────
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+    # Only needed when routing Groq through a proxy/gateway; blank = the real API.
+    GROQ_BASE_URL: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_MAX_TOKENS: int = 4096
     GROQ_TEMPERATURE: float = 0.3
+
+    # ── AI / Groq — document summaries ────────────────────────────────────────
+    # Free-tier keys do not include every model: check the models your key can
+    # see before changing these (GET /openai/v1/models, or python cpanel_check.py).
+    GROQ_MAP_MODEL: str = ""       # outline + section expansion; blank = GROQ_MODEL
+    GROQ_SUMMARY_MODEL: str = ""   # final synthesis;          blank = GROQ_MODEL
+    # Reasoning models (gpt-oss) spend this budget on thinking before answering;
+    # too low and the answer comes back empty.
+    GROQ_SUMMARY_MAX_TOKENS: int = 8000
+
+    # ── Summariser limits (cost control) ──────────────────────────────────────
+    SUMMARISE_ENABLED: bool = True
+    SUMMARISE_MAX_INPUT_TOKENS: int = 5000     # per model call
+    SUMMARISE_DAILY_TOKEN_BUDGET: int = 150000 # whole app, rolling 24h
+    SUMMARISE_PER_IP_DAILY_TOKENS: int = 30000 # per client, rolling 24h
+    SUMMARISE_CALLS_PER_REQUEST: int = 3       # keeps a request short on shared hosting
+    SUMMARISE_MAX_SECTIONS: int = 24           # ceiling on sections expanded per run
 
     class Config:
         # Absolute path: under Passenger/cPanel the process CWD is not the

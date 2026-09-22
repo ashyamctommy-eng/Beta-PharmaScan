@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from api.routes import router as api_router
+from api.summary_routes import router as summary_router
 from core.config import settings
 from core.database import init_db
 
@@ -66,8 +67,9 @@ app.mount(
 # ── Template engine ───────────────────────────────────────────────────────────
 templates = Jinja2Templates(directory=str(settings.TEMPLATES_DIR))
 
-# ── API router ────────────────────────────────────────────────────────────────
+# ── API routers ───────────────────────────────────────────────────────────────
 app.include_router(api_router)
+app.include_router(summary_router)
 
 
 # ── Root route ────────────────────────────────────────────────────────────────

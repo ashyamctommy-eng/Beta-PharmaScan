@@ -1,13 +1,14 @@
 # cPanel (Phusion Passenger) requirements for PharmaScanKE.
 #
 # Differs from requirements.txt in exactly two ways:
-#   * a2wsgi      — the ASGI -> WSGI bridge Passenger needs (pure Python).
-#   * no uvicorn  — Passenger IS the HTTP server; uvicorn[standard] would pull
+#   * +a2wsgi     — the ASGI -> WSGI bridge Passenger needs (pure Python).
+#   * -uvicorn    — Passenger IS the HTTP server; uvicorn[standard] would pull
 #                   uvloop/httptools/watchfiles, which need a compiler when no
 #                   wheel exists for your Python version. Not needed here.
 #
-# Everything below ships a manylinux wheel for CPython 3.9-3.13 on x86_64, so
-# `pip install` on cPanel should complete without a build toolchain.
+# Everything below (including the transitive lxml/Pillow/XlsxWriter pulled in by
+# python-docx/python-pptx) ships a manylinux wheel for CPython 3.10-3.13 on
+# x86_64, so `pip install` on cPanel completes without a build toolchain.
 
 fastapi==0.115.5
 sqlalchemy==2.0.36
@@ -21,4 +22,8 @@ jinja2==3.1.4
 groq==1.5.0
 httpx>=0.25.0,<0.29.0
 python-dotenv==1.0.1
+# document extraction for the summary pipeline (all pure-Python wheels)
+pypdf==6.19.0
+python-docx==1.2.0
+python-pptx==1.0.2
 a2wsgi==1.10.10
