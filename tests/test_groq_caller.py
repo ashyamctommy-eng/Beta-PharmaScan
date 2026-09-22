@@ -115,14 +115,16 @@ class TestGroqCaller(GroqCallerCase):
         mock = MockGroq([
             (400, {"error": {"message": "response_format is not supported for this model"}}),
             (200, chat_response('{"ok": true}')),
+            (200, chat_response('{"ok": true}')),      # the second call, still without JSON mode
         ])
         try:
             caller = self._caller(mock)
             outcome = self._call(caller)
-            second = self._call(caller)
+            second = self._call(caller)          # a second call must also skip JSON mode
         finally:
             mock.stop()
         self.assertEqual(outcome.payload, {"ok": True})
+        self.assertEqual(second.payload, {"ok": True})
         self.assertIn("JSON mode", outcome.warning)
         self.assertNotIn("response_format", mock.requests[1], "retry must drop response_format")
         self.assertNotIn("response_format", mock.requests[2], "fallback must be remembered")

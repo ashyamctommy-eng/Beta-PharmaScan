@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -138,11 +139,34 @@ class TestPdfExtraction(TempFixture):
         self.assertTrue(result.scanned)
         self.assertTrue(any("scanned" in w.lower() for w in result.warnings))
 
+    def test_body_numbers_are_not_mistaken_for_page_numbers(self) -> None:
+        """Regression: a bare 3-4 digit body line (a dose, a year) must survive."""
+        path = fixtures.build_pdf_with_numbers(self.dir / "numbers.pdf")
+        result = extract_document(path)
+        self.assertIn("500", result.text, "a bare dose value must not be stripped as a page number")
+        self.assertIn("2024", result.text, "a bare year must not be stripped as a page number")
+
+    def test_decorated_page_numbers_are_stripped_anywhere(self) -> None:
+        path = fixtures.build_pdf_with_numbers(self.dir / "numbers.pdf")
+        result = extract_document(path)
+        self.assertNotIn("Page 7", result.text)
+        self.assertNotIn("[8]", result.text)
+
+    def test_end_page_covers_the_body_text_attributed_to_the_section(self) -> None:
+        """Regression: end_page was 'next heading page - 1', which is wrong when
+        text sits above the next heading on its page, and gives end < start when
+        two headings share a page."""
+        path = fixtures.build_pdf(self.dir / "notes.pdf", pages=10)
+        result = extract_document(path)
+        for section in result.sections:
+            self.assertGreaterEqual(section.end_page, section.page,
+                                    f"section '{section.heading}' has an impossible page range")
+
     def test_preview_payload_shape(self) -> None:
         path = fixtures.build_pdf(self.dir / "notes.pdf", pages=8)
         preview = extract_document(path).preview(estimated_cost_tokens=1234)
         for key in ("kind", "pages", "tokens", "sections", "skeleton_tokens",
-                    "estimated_cost_tokens", "warnings", "scanned", "has_structure"):
+                    "estimated_cost_tokens", "warnings", "scanned", "has_structure", "has_pages"):
             self.assertIn(key, preview)
         self.assertEqual(preview["estimated_cost_tokens"], 1234)
         self.assertEqual(preview["kind"], "pdf")
@@ -150,6 +174,14 @@ class TestPdfExtraction(TempFixture):
 
 @unittest.skipUnless(HAVE_DOCX, "python-docx not installed")
 class TestDocxExtraction(TempFixture):
+    def test_docx_reports_that_it_has_no_pages(self) -> None:
+        """Regression: DOCX/TXT sections used to carry page=0, which the pipeline
+        then clamped to a fabricated 'p.1' on every bullet."""
+        result = extract_document(fixtures.build_docx(self.dir / "notes.docx"))
+        self.assertFalse(result.has_pages)
+        for section in result.sections:
+            self.assertEqual(section.page, 0)
+
     def test_headings_styles_and_table(self) -> None:
         path = fixtures.build_docx(self.dir / "notes.docx")
         result = extract_document(path)
@@ -165,6 +197,13 @@ class TestDocxExtraction(TempFixture):
 
 @unittest.skipUnless(HAVE_PPTX, "python-pptx not installed")
 class TestPptxExtraction(TempFixture):
+    def test_citations_use_real_slide_numbers(self) -> None:
+        """Regression: the slide number was computed and then dropped, so every
+        PPTX citation collapsed to p.1."""
+        result = extract_document(fixtures.build_pptx(self.dir / "slides.pptx"))
+        self.assertTrue(result.has_pages)
+        self.assertEqual([s.page for s in result.sections], [1, 2, 3])
+
     def test_slide_per_section(self) -> None:
         path = fixtures.build_pptx(self.dir / "slides.pptx")
         result = extract_document(path)
@@ -176,6 +215,10 @@ class TestPptxExtraction(TempFixture):
 
 
 class TestPlainExtraction(TempFixture):
+    def test_plain_text_has_no_pages(self) -> None:
+        result = extract_document(fixtures.build_plain_text(self.dir / "notes.md"))
+        self.assertFalse(result.has_pages)
+
     def test_markdown_headings(self) -> None:
         path = fixtures.build_plain_text(self.dir / "notes.md")
         result = extract_document(path)
@@ -192,6 +235,15 @@ class TestRefusals(TempFixture):
         with self.assertRaises(ExtractionError) as ctx:
             extract_document(path)
         self.assertIn("save as", str(ctx.exception))
+
+    def test_zip_bomb_is_refused(self) -> None:
+        path = self.dir / "bomb.docx"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("word/document.xml", b"\0" * (600 * 1024 * 1024))
+        self.assertLess(path.stat().st_size, 2 * 1024 * 1024)
+        with self.assertRaises(ExtractionError) as ctx:
+            extract_document(path)
+        self.assertIn("expands to", str(ctx.exception))
 
     def test_unsupported_extension_is_refused(self) -> None:
         path = self.dir / "image.png"

@@ -12,6 +12,7 @@ Three tables, each earning its place:
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -39,7 +40,13 @@ class Summary(Base):
     pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sections_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sections_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sections_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens_spent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Short-lived lease: one tick at a time per document, so two tabs (or two
+    # students) cannot duplicate the plan, the spend or the notes. Expires on its
+    # own after a crash.
+    lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     outline_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
     notes_json: Mapped[str] = mapped_column(Text, default="", nullable=False)

@@ -183,6 +183,7 @@ python -m unittest discover -s tests -t .      # all 37
 | “Short notes” → **Groq rejected the server's API key (HTTP 401)** | The key on the server is wrong, revoked, or was pasted with whitespace | Fix `GROQ_API_KEY` in `.env`, `touch tmp/restart.txt`. Keys are invalidated when regenerated in the Groq console. |
 | “Short notes” → **Groq is rate-limiting this key** | Free tier is ~8,000 tokens/minute | Nothing is lost: press **Continue**. Finished sections are saved. Bigger documents: use the **brief** depth, or raise `SUMMARISE_DAILY_TOKEN_BUDGET` / upgrade the Groq plan. |
 | “Short notes” → **no readable text layer** | The PDF is a scan or a photo — there is no text to read | Not fixable on shared hosting (no OCR). Upload a text-based PDF, or paste the text into the analysis box. |
+| “Short notes” → **N section(s) could not be summarised** | Those sections' model replies were unusable, or the vendor errored on them | The rest of the notes are fine; press **Continue** to retry the remainder. Details are in the notes' warnings and in the error log. |
 | Notes cost more tokens than expected | Depth is `full`, or the document is large | The preview quotes the cost of each depth before generating; `brief` skips section expansion entirely. Results are cached per file, so regenerating the same file is free. |
 
 ---

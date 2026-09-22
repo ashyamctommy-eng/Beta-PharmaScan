@@ -67,7 +67,8 @@ class StubCaller:
                                  estimate_tokens(user) + 90, payload)
         if kind == "section":
             heading = re.search(r"Section: (.+)", user)
-            page = int(re.search(r"Pages: p\.(\d+)", user).group(1))
+            page_match = re.search(r"Pages: p\.(\d+)", user)
+            page = int(page_match.group(1)) if page_match else 0   # no-page formats omit the line
             payload = {
                 "usable": True,
                 "bullets": [
@@ -306,6 +307,205 @@ class TestQuotaAndFailures(PipelineCase):
 
         self.assertEqual(result.status, "done")
         self.assertGreaterEqual(len(caller.calls), 3, "prose reply should trigger one retry")
+
+
+class TestReviewRegressions(PipelineCase):
+    """Each test here locks in a bug found by an independent review of the diff."""
+
+    def test_non_numeric_importance_does_not_crash_the_run(self) -> None:
+        class BadImportance(StubCaller):
+            async def call(self, **kwargs):
+                outcome = await super().call(**kwargs)
+                if kwargs["kind"] == "outline" and outcome.payload:
+                    for section in outcome.payload["sections"]:
+                        section["importance"] = "high"          # not an int
+                return outcome
+
+        extraction = fake_extraction(sections=3)
+        summary = asyncio.run(self._new_summary())
+        result = asyncio.run(self._tick(summary, extraction, BadImportance(), max_calls=10))
+        self.assertEqual(result.status, "done", result.message)
+
+    def test_string_citations_are_coerced(self) -> None:
+        class StringPages(StubCaller):
+            async def call(self, **kwargs):
+                outcome = await super().call(**kwargs)
+                if kwargs["kind"] == "section" and outcome.payload:
+                    outcome.payload["bullets"] = [{"text": "A fact.", "page": "p.7"},   # prefixed
+                                                  {"text": "Another.", "page": "9-10"}]  # a range
+                    outcome.payload["drug_table"] = []
+                return outcome
+
+        extraction = fake_extraction(sections=2)
+        summary = asyncio.run(self._new_summary(depth="full"))
+        result = asyncio.run(self._tick(summary, extraction, StringPages(), max_calls=10))
+        self.assertEqual(result.status, "done")
+        pages = [b["page"] for t in result.notes["topics"] for b in t["bullets"]]
+        self.assertTrue(all(isinstance(p, int) and p > 0 for p in pages), pages)
+        self.assertLessEqual(max(pages), 2, "citations must be clamped into the section range")
+
+    def test_formats_without_pages_carry_no_citations(self) -> None:
+        extraction = fake_extraction(sections=2)
+        for section in extraction.sections:
+            section.page = 0
+            section.end_page = 0
+        summary = asyncio.run(self._new_summary(depth="full"))
+
+        class PaperNoPages(StubCaller):
+            async def call(self, **kwargs):
+                outcome = await super().call(**kwargs)
+                if kwargs["kind"] == "section" and outcome.payload:
+                    for bullet in outcome.payload["bullets"]:
+                        bullet["page"] = 4                      # model invents one anyway
+                return outcome
+
+        result = asyncio.run(self._tick(summary, extraction, PaperNoPages(), max_calls=10))
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.sections_failed, 0, "the run must not lose sections in this format")
+        topics = result.notes["topics"]
+        self.assertTrue(topics, "notes must still be produced for a page-less format")
+        pages = [b["page"] for t in topics for b in t["bullets"]]
+        self.assertTrue(pages, "there should be bullets to check")
+        self.assertTrue(all(p == 0 for p in pages), f"no pages exist, so none may be cited: {pages}")
+
+    def test_a_second_concurrent_tick_is_refused(self) -> None:
+        summary = asyncio.run(self._new_summary())
+
+        async def claim_twice() -> tuple[bool, bool]:
+            async with self.Session() as db:
+                first = await S.claim_lease(db, summary.id)
+                second = await S.claim_lease(db, summary.id)
+            return first, second
+
+        first, second = asyncio.run(claim_twice())
+        self.assertTrue(first)
+        self.assertFalse(second, "a second tick must not run concurrently on the same document")
+
+        # The lease holder then tries to run: it should report 'busy', not duplicate work.
+        extraction = fake_extraction(sections=3)
+        caller = StubCaller()
+        result = asyncio.run(self._tick(summary, extraction, caller, max_calls=5))
+        self.assertEqual(result.status, "busy")
+        self.assertEqual(len(caller.calls), 0, "no model calls may happen while another tick holds the lease")
+
+    def test_expired_lease_can_be_reclaimed(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        summary = asyncio.run(self._new_summary())
+
+        async def claim() -> tuple[bool, bool]:
+            async with self.Session() as db:
+                await S.claim_lease(db, summary.id)
+                fresh = await db.get(Summary, summary.id)
+                fresh.lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+                await db.commit()
+                return await S.claim_lease(db, summary.id)
+
+        self.assertTrue(asyncio.run(claim()), "an expired lease must be reclaimable (crash recovery)")
+
+    def test_chunks_completed_before_a_rate_limit_are_not_repaid(self) -> None:
+        """A long section is several calls; a 429 mid-section must not throw them away."""
+        long_text = "\n".join(f"Sentence {i} about pharmacokinetics and drug clearance." for i in range(900))
+        extraction = fake_extraction(sections=1)
+        extraction.sections[0].text = long_text
+        extraction.sections[0].tokens = estimate_tokens(long_text)
+        summary = asyncio.run(self._new_summary(depth="full"))
+
+        class FailsOnSecondChunk(StubCaller):
+            async def call(self, **kwargs):
+                if kwargs["kind"] == "section" and sum(1 for c in self.calls if c["kind"] == "section") >= 1:
+                    exc = RuntimeError("rate limited")
+                    exc.status_code = 429                                    # type: ignore[attr-defined]
+                    exc.response = type("R", (), {"headers": {}})()
+                    raise exc
+                return await super().call(**kwargs)
+
+        first_caller = FailsOnSecondChunk()
+        first = asyncio.run(self._tick(summary, extraction, first_caller, max_calls=6))
+        self.assertEqual(first.status, "rate_limited")
+
+        async def partial_state() -> tuple[str, int]:
+            async with self.Session() as db:
+                from sqlalchemy import select
+                row = (await db.execute(select(SummarySection)
+                                        .where(SummarySection.summary_id == summary.id))).scalars().first()
+                return row.payload_json, row.status
+
+        payload, status = asyncio.run(partial_state())
+        self.assertEqual(status, "pending")
+        self.assertIn("_chunks_done", payload, "completed chunks must be persisted for the resume")
+
+        resumed_caller = StubCaller()
+        result = asyncio.run(self._tick(summary, extraction, resumed_caller, max_calls=10))
+        self.assertEqual(result.status, "done", result.message)
+        section_calls = sum(1 for c in resumed_caller.calls if c["kind"] == "section")
+        total_chunks = len(S._split_text(long_text, S.settings.SUMMARISE_MAX_INPUT_TOKENS * 4 - 1200))
+        self.assertGreater(total_chunks, 1, "this fixture must need several chunks")
+        self.assertLess(section_calls, total_chunks,
+                        "the resumed run must not repeat the chunks already completed")
+
+    def test_chunking_uses_the_token_budget_not_characters(self) -> None:
+        """Regression: the chunk size was compared against a *token* budget in
+        characters, so a section produced ~4x more calls than the quoted estimate."""
+        text = "word " * 2400                                    # ~12,000 chars ≈ 3,000 tokens
+        section = Section(id="s1", heading="T", level=1, page=1, end_page=1,
+                          text=text, tokens=estimate_tokens(text))
+        chunks = S._split_text(section.text, S.settings.SUMMARISE_MAX_INPUT_TOKENS * 4 - 1200)
+        self.assertEqual(len(chunks), 1, "a 3,000-token section must fit in one 5,000-token call")
+        quoted = S.estimate_cost_tokens(Extraction(
+            kind="pdf", pages=1, sections=[section], text=text, tokens=section.tokens), "full")
+        self.assertLess(quoted, 12_000, "the quote must be of the same order as the real cost")
+
+    def test_spend_is_recorded_exactly_once(self) -> None:
+        extraction = fake_extraction(sections=3)
+        summary = asyncio.run(self._new_summary(depth="full"))
+        caller = StubCaller()
+        asyncio.run(self._tick(summary, extraction, caller, max_calls=10))
+
+        async def totals() -> tuple[int, int]:
+            async with self.Session() as db:
+                from sqlalchemy import func, select
+                events = int((await db.execute(
+                    select(func.coalesce(func.sum(UsageEvent.total_tokens), 0)))).scalar() or 0)
+                fresh = await db.get(Summary, summary.id)
+                return events, fresh.tokens_spent
+
+        events, reported = asyncio.run(totals())
+        self.assertEqual(reported, events, "summary.tokens_spent must equal the usage ledger")
+
+    def test_budget_room_is_the_smaller_of_the_two_ceilings(self) -> None:
+        async def seed() -> None:
+            async with self.Session() as db:
+                db.add(UsageEvent(kind="section", model="m", total_tokens=149_000, client="someone"))
+                await db.commit()
+
+        asyncio.run(seed())
+        S.settings.SUMMARISE_DAILY_TOKEN_BUDGET = 150_000
+        S.settings.SUMMARISE_PER_IP_DAILY_TOKENS = 30_000
+
+        async def room() -> tuple[int, str]:
+            async with self.Session() as db:
+                return await S.budget_room(db, "fresh-client")
+
+        remaining, blocked = asyncio.run(room())
+        self.assertFalse(blocked)
+        self.assertEqual(remaining, 1_000, "the app-wide room must bound the per-client room")
+
+    def test_failed_sections_are_counted_and_reported(self) -> None:
+        extraction = fake_extraction(sections=2)
+        summary = asyncio.run(self._new_summary(depth="full"))
+
+        class SectionFails(StubCaller):
+            async def call(self, **kwargs):
+                if kwargs["kind"] == "section":
+                    exc = RuntimeError("model exploded")
+                    exc.status_code = 500                                   # type: ignore[attr-defined]
+                    raise exc
+                return await super().call(**kwargs)
+
+        result = asyncio.run(self._tick(summary, extraction, SectionFails(), max_calls=10))
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.sections_failed, 2)
+        self.assertTrue(any("could not be summaris" in w for w in result.warnings + (result.notes or {}).get("warnings", [])))
 
 
 class TestMergingAndHelpers(unittest.TestCase):

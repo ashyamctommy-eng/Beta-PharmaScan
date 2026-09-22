@@ -71,12 +71,21 @@ two ceilings: a per-client allowance and an app-wide daily budget
 (`SUMMARISE_DAILY_TOKEN_BUDGET`). That budget is the thing that protects your key if the
 endpoint is ever hit by someone you did not invite.
 
-## Resumability and caching
+## Resumability, caching and concurrency
 
 - Notes are cached **by file hash** — a document is summarised once, ever. Reopening it
   costs nothing.
-- Each section is committed as it finishes. If a run stops — daily budget, rate limit,
-  crash — **press Continue** and it resumes where it stopped instead of paying again.
+- The parsed document is cached in memory per worker, keyed by path + mtime + size, so a
+  preview or a tick does not re-parse a large PDF every time.
+- Each section is committed as it finishes, **and so is each chunk of a long section**. If
+  a run stops — daily budget, rate limit, crash — **press Continue** and it resumes at the
+  first unfinished chunk instead of paying again.
+- One run per document at a time: a short lease stops a double submit or a second tab from
+  duplicating the plan, the spend and the notes. The lease expires by itself, so a crash
+  cannot lock a document out.
+- Sections that fail (a malformed model reply, a vendor error) do not abort the run: they
+  are counted, reported as "N section(s) could not be summarised", and listed in the notes'
+  warnings.
 - Changing the depth discards the expansion and rebuilds at the new depth.
 
 ## Settings
@@ -101,6 +110,12 @@ endpoint is ever hit by someone you did not invite.
   invent content from a picture of a page.
 - **Legacy `.doc` / `.ppt`.** Binary formats that need LibreOffice. The app tells you to
   re-save as `.docx`/`.pptx`/PDF.
+- **Page citations only exist where pages do.** PDFs cite real pages and PPTX cites slide
+  numbers; DOCX and TXT have no page numbers, so their notes carry none rather than a
+  fabricated `p.1`.
+- **Absurd inputs are refused.** A PDF beyond 1,500 pages, or a DOCX/PPTX that expands past
+  400 MB (a zip bomb — the upload limit only measures the compressed size), is rejected with
+  an explanation before anything is parsed.
 - **Tables are the weakest point.** `pypdf` flattens them into word soup; the model is
   asked to reconstruct what it can, and drug tables are kept where the text allows.
 - **Multi-column layouts** can scramble reading order on some pages; the preview warns

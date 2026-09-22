@@ -136,6 +136,39 @@ def build_scanned_like_pdf(path: Path) -> Path:
     return path
 
 
+def build_pdf_with_numbers(path: Path) -> Path:
+    """Body lines that are bare numbers (doses/years) plus decorated page numbers."""
+    from fpdf import FPDF
+
+    class NumberedPdf(FPDF):
+        def header(self) -> None:
+            self.set_font("Helvetica", "I", 8)
+            self.set_y(8)
+            self.set_x(self.l_margin)
+            self.multi_cell(180, 5, HEADER)
+
+    pdf = NumberedPdf()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.set_margins(15, 15, 15)
+    for index in range(5):
+        pdf.add_page()
+        pdf.set_y(26)
+        for line in ("Paracetamol 500", "2024",
+                     "Amoxicillin dose 250 mg three times daily for five days.",
+                     f"Chapter {index + 1} continues with more clinical detail about dosing."):
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(180, 5.5, line)
+        pdf.set_y(-14)
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.multi_cell(180, 5, f"Page {index + 7}")
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(180, 5, f"[{index + 8}]")
+    pdf.output(str(path))
+    return path
+
+
 def build_docx(path: Path) -> Path:
     import docx
 
@@ -160,7 +193,6 @@ def build_docx(path: Path) -> Path:
 
 def build_pptx(path: Path) -> Path:
     from pptx import Presentation
-    from pptx.util import Inches
 
     deck = Presentation()
     for title, body in [

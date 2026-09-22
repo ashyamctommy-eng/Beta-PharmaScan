@@ -25,7 +25,7 @@ import re
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 # ── Tunables (measured on a 40-page fixture; see tests/test_extraction.py) ────
 CHARS_PER_TOKEN = 4
@@ -39,6 +39,9 @@ MAX_HEADING_CHARS = 90
 WINDOW_TOKENS = 2000       # fallback window size when no headings are found
 WINDOW_OVERLAP = 0.12
 MIN_TEXT_CHARS_PER_PAGE = 100   # below this the "page" is probably an image
+MAX_SECTION_CHARS = 120_000     # a section longer than this is truncated (and said so)
+MAX_PDF_PAGES = 1500            # refuse absurd page counts before parsing them all
+MAX_UNCOMPRESSED_MB = 400       # zip-bomb guard for DOCX/PPTX (compressed size is not enough)
 
 PDF_SUFFIXES = {".pdf"}
 DOCX_SUFFIXES = {".docx"}
@@ -90,6 +93,7 @@ class Extraction:
     tokens: int
     warnings: list[str] = field(default_factory=list)
     scanned: bool = False
+    has_pages: bool = True          # False for DOCX/TXT: there is no page to cite
     chars_per_page: int = 0
     duplicate_lines_collapsed: int = 0
     multi_column_pages: int = 0
@@ -123,6 +127,7 @@ class Extraction:
             "chars_per_page": median,
             "has_structure": self.has_structure,
             "scanned": self.scanned,
+            "has_pages": self.has_pages,
             "sections": [s.to_dict() for s in self.sections],
             "skeleton_tokens": estimate_tokens(self.skeleton()),
             "estimated_cost_tokens": estimated_cost_tokens,
@@ -135,6 +140,29 @@ class Extraction:
 def estimate_tokens(text: str) -> int:
     """Rough token count. Deliberately conservative (chars/4)."""
     return max(1, round(len(text) / CHARS_PER_TOKEN)) if text else 0
+
+
+def _guard_zip_bomb(path: Path) -> None:
+    """Refuse an archive that would expand to far more than it claims.
+
+    DOCX/PPTX are ZIPs, and the upload limit applies to the *compressed* size. A
+    small file can expand to gigabytes and take a worker down with it, so the
+    uncompressed total is checked before handing the file to the parser.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile:
+        raise ExtractionError("This file is not a valid DOCX/PPTX archive.")
+    except Exception as exc:  # noqa: BLE001 - unreadable archive
+        raise ExtractionError(f"Could not open this file: {exc}") from exc
+    if total > MAX_UNCOMPRESSED_MB * 1024 * 1024:
+        raise ExtractionError(
+            f"This file expands to {total / 1024 / 1024:.0f} MB of content, which is beyond the "
+            f"{MAX_UNCOMPRESSED_MB} MB limit. Re-save it (or export to PDF) and try again."
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -182,6 +210,11 @@ def _extract_pdf(path: Path) -> Extraction:
 
     try:
         reader = PdfReader(str(path))
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise ExtractionError(
+                f"This PDF has {len(reader.pages):,} pages, beyond the {MAX_PDF_PAGES:,}-page limit. "
+                "Split it into chapters and upload them separately."
+            )
         if reader.is_encrypted:
             try:
                 reader.decrypt("")           # many lecture PDFs are owner-locked only
@@ -248,7 +281,7 @@ def _extract_pdf(path: Path) -> Extraction:
         )
 
     body_size = _dominant_size(pages_raw, blocks)
-    sections = _sections_from_blocks(blocks, body_size, total_pages)
+    sections = _sections_from_blocks(blocks, body_size, total_pages, warnings)
 
     text = "\n".join(b.text for b in blocks)
     chars_per_page = int(statistics.median([len(" ".join(b.text for b in e["blocks"])) for e in pages_raw])) if pages_raw else 0
@@ -312,9 +345,12 @@ def _strip_furniture(pages_raw: list[dict]) -> tuple[list[dict], int]:
                 band_counts[block.text] = band_counts.get(block.text, 0) + 1
     furniture = {t for t, c in band_counts.items() if c > total * REPEAT_PAGE_FRACTION}
 
-    explicit_page_number = re.compile(
-        r"^(?:page\s*|p\.?\s*)?[-–—\[(]?\s*\d{1,4}\s*[-–—\])]?$", re.IGNORECASE
+    # "Page 4", "- 4 -", "[4]", "(iv)" are unmistakable page numbers wherever they sit.
+    decorated_page_number = re.compile(
+        r"^(?:page\s*\d{1,4}|p\.?\s*\d{1,4}|[-–—\[(]\s*\d{1,4}\s*[-–—\])])$", re.IGNORECASE
     )
+    # A bare number is only dropped inside the band: in the body it is more likely to
+    # be a dose, a year or a table value (e.g. "500", "2024") than a page number.
     bare_number = re.compile(r"^\d{1,4}$")
 
     removed = 0
@@ -324,7 +360,7 @@ def _strip_furniture(pages_raw: list[dict]) -> tuple[list[dict], int]:
             in_band = block.band in ("top", "bottom")
             drop = (
                 block.text in furniture
-                or bool(explicit_page_number.match(block.text)) and (in_band or len(block.text) > 2)
+                or bool(decorated_page_number.match(block.text))
                 or (in_band and bool(bare_number.match(block.text)))
             )
             if drop:
@@ -335,7 +371,8 @@ def _strip_furniture(pages_raw: list[dict]) -> tuple[list[dict], int]:
     return pages_raw, removed
 
 
-def _sections_from_blocks(blocks: list[Block], body_size: float, total_pages: int) -> list[Section]:
+def _sections_from_blocks(blocks: list[Block], body_size: float, total_pages: int,
+                          warnings: Optional[list[str]] = None) -> list[Section]:
     if body_size <= 0:
         return []
     # NOTE: no band filter here. A heading often sits high on the page; band
@@ -357,36 +394,49 @@ def _sections_from_blocks(blocks: list[Block], body_size: float, total_pages: in
         headings.append(block)
 
     body_order = [b for b in blocks if b not in headings]
-    numbered = re.compile(r"^(\d+(\.\d+)*)[.)]?\s+\S")
+    numbered = re.compile(r"^(\d+(?:\.\d+)*)[.)]?\s+\S")
+    truncated: list[str] = []
     sections: list[Section] = []
     for i, head in enumerate(headings):
         level = head.text.count(".") + 1 if numbered.match(head.text) else (
             1 if head.size >= body_size + 3 else 2
         )
         nxt = headings[i + 1] if i + 1 < len(headings) else None
-        body_parts = [
-            b.text for b in body_order
+        matched = [
+            b for b in body_order
             if (b.page > head.page or (b.page == head.page and b.y <= head.y))
             and (nxt is None or b.page < nxt.page or (b.page == nxt.page and b.y > nxt.y))
         ]
-        text = "\n".join(body_parts).strip()
+        full_text = "\n".join(b.text for b in matched).strip()
+        text = full_text[:MAX_SECTION_CHARS]
+        if len(full_text) > MAX_SECTION_CHARS:
+            truncated.append(head.text.strip())
+        # end_page comes from the text actually attributed to this section: "next
+        # heading minus one page" is wrong when headings share a page, and when text
+        # sits above the next heading on its page.
+        end_page = max([b.page for b in matched] + [head.page])
         sections.append(Section(
             id=f"s{i + 1}",
             heading=head.text.strip(),
             level=min(level, 3),
             page=head.page,
-            end_page=(nxt.page - 1 if nxt else total_pages) or head.page,
-            text=text[:12000],
-            tokens=estimate_tokens(text[:12000]),
+            end_page=max(end_page, head.page),
+            text=text,
+            tokens=estimate_tokens(text),
         ))
 
     # Drop headings that carry no body text (cover pages, running section titles).
     # If nothing has content, return [] so the caller falls back to token windows
     # (the window builder keeps every block, so nothing is lost).
+    if truncated and warnings is not None:
+        warnings.append(
+            f"{len(truncated)} section(s) are longer than {MAX_SECTION_CHARS:,} characters and were "
+            f"trimmed (e.g. {truncated[0]})."
+        )
     substantive = [s for s in sections if s.text.strip()]
     if len(substantive) >= 3:
         return substantive
-    return sections
+    return substantive or sections
 
 
 def _dedupe_blocks(blocks: list[Block]) -> tuple[list[Block], int]:
@@ -405,17 +455,14 @@ def _dedupe_blocks(blocks: list[Block]) -> tuple[list[Block], int]:
         return blocks, 0
     kept: list[Block] = []
     dropped = 0
+    kept_first: set[str] = set()
     for block in blocks:
         if block.text in drop:
-            dropped += 1
-            continue
+            if block.text in kept_first:
+                dropped += 1
+                continue
+            kept_first.add(block.text)      # first occurrence stays exactly where it was
         kept.append(block)
-    # keep the first occurrence in place rather than deleting the line entirely
-    for text in drop:
-        first = next((b for b in blocks if b.text == text), None)
-        if first is not None:
-            kept.append(first)
-            dropped -= 1
     return kept, dropped
 
 
@@ -434,10 +481,12 @@ def _window_fallback(blocks: list[Block], total_pages: int) -> list[Section]:
         if not chunk:
             return
         text = "\n".join(b.text for b in chunk)
+        pages = [b.page for b in chunk]
+        start_page, end_page = min(pages), max(pages)
         sections.append(Section(
             id=f"s{index}",
-            heading=f"Part {index} (p.{chunk[0].page}-{chunk[-1].page})",
-            level=1, page=chunk[0].page, end_page=chunk[-1].page,
+            heading=f"Part {index} (p.{start_page}-{end_page})",
+            level=1, page=start_page, end_page=max(start_page, end_page),
             text=text, tokens=estimate_tokens(text),
         ))
         index += 1
@@ -461,12 +510,13 @@ def _extract_docx(path: Path) -> Extraction:
     except ImportError as exc:  # pragma: no cover
         raise ExtractionError(f"python-docx is not installed: {exc}") from exc
 
+    _guard_zip_bomb(path)
     try:
         document = docx.Document(str(path))
     except Exception as exc:
         raise ExtractionError(f"Could not read this DOCX: {exc}") from exc
 
-    entries: list[tuple[str, int, str]] = []       # (text, level, kind)
+    entries: list[tuple[str, int, str, int]] = []   # (text, level, kind, page)
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if not text:
@@ -476,21 +526,22 @@ def _extract_docx(path: Path) -> Extraction:
             2 if style.startswith("heading 2") else (3 if style.startswith("heading 3") else 0))
         if style.startswith("title"):
             level = 1
-        entries.append((text, level, "heading" if level else "body"))
+        entries.append((text, level, "heading" if level else "body", 0))
 
     for table in document.tables:
         for row in table.rows:
             cells = [c.text.strip() for c in row.cells if c.text.strip()]
             if cells:
-                entries.append((" | ".join(cells), 0, "body"))
+                entries.append((" | ".join(cells), 0, "body", 0))
 
-    sections = _sections_from_stream(entries, paged=False)
-    text = "\n".join(t for t, _, _ in entries)
+    sections = _sections_from_stream(entries)
+    text = "\n".join(t for t, _, _, _ in entries)
     if not sections:
-        sections = _stream_windows([(t, 1) for t, _, _ in entries])
+        sections = _stream_windows([(t, 1) for t, _, _, _ in entries])
     return Extraction(
         kind="docx", pages=1, sections=sections, text=text, tokens=estimate_tokens(text),
-        warnings=["DOCX has no fixed pages; page citations use paragraph order."] if sections else [],
+        has_pages=False,
+        warnings=["DOCX has no page numbers, so the notes carry no page citations."] if sections else [],
         chars_per_page=len(text),
     )
 
@@ -502,12 +553,14 @@ def _extract_pptx(path: Path) -> Extraction:
     except ImportError as exc:  # pragma: no cover
         raise ExtractionError(f"python-pptx is not installed: {exc}") from exc
 
+    _guard_zip_bomb(path)
     try:
         deck = Presentation(str(path))
     except Exception as exc:
         raise ExtractionError(f"Could not read this PPTX: {exc}") from exc
 
-    entries: list[tuple[str, int, str]] = []
+    entries: list[tuple[str, int, str, int]] = []
+    numbered: list[tuple[str, int, str, int]] = []
     for number, slide in enumerate(deck.slides, start=1):
         title = ""
         body: list[str] = []
@@ -521,23 +574,18 @@ def _extract_pptx(path: Path) -> Extraction:
                 title = text
             else:
                 body.append(text)
-        entries.append((title or f"Slide {number}", 1, "heading"))
+        # Each slide is its own page — that is how students cite slides.
+        numbered.append((title or f"Slide {number}", 1, "heading", number))
         for item in body:
-            entries.append((item, 0, "body"))
+            numbered.append((item, 0, "body", number))
 
-    # Each slide is its own page (that is how students cite slides).
-    counter = {"page": 0}
-    paged: list[tuple[str, int, str, int]] = []
-    for text, level, kind in entries:
-        if kind == "heading":
-            counter["page"] += 1
-        paged.append((text, level, kind, max(1, counter["page"])))
-    sections = _sections_from_stream([(t, l, k) for t, l, k, _ in paged], paged=paged)
-    full = "\n".join(t for t, _, _ in entries)
+    entries = numbered
+    sections = _sections_from_stream(entries)
+    full = "\n".join(t for t, _, _, _ in entries)
     return Extraction(
         kind="pptx", pages=len(deck.slides), sections=sections, text=full,
         tokens=estimate_tokens(full), chars_per_page=len(full) // max(1, len(deck.slides)),
-    )
+    )  # pages are real slide numbers, so citations work as usual
 
 
 # ── plain text ────────────────────────────────────────────────────────────────
@@ -556,17 +604,23 @@ def _extract_plain(path: Path) -> Extraction:
             or bool(re.match(r"^(\d+(\.\d+)*)[.)]?\s+\S", stripped) and len(stripped) < MAX_HEADING_CHARS)
             or (stripped.isupper() and 4 < len(stripped) < MAX_HEADING_CHARS)
         )
-        entries.append((stripped.lstrip("# ").strip(), 1 if heading else 0, "heading" if heading else "body"))
-    sections = _sections_from_stream(entries, paged=False)
+        entries.append((stripped.lstrip("# ").strip(), 1 if heading else 0,
+                        "heading" if heading else "body", 0))
+    sections = _sections_from_stream(entries)
     if not sections:
         sections = _stream_windows([(t, 1) for t, _, _ in entries])
     return Extraction(kind="text", pages=1, sections=sections, text=text,
-                      tokens=estimate_tokens(text), chars_per_page=len(text))
+                      tokens=estimate_tokens(text), chars_per_page=len(text), has_pages=False)
 
 
 # ── shared section builders ───────────────────────────────────────────────────
-def _sections_from_stream(entries: list[tuple], paged: bool = False, paged_rows: Optional[list] = None):
-    rows = paged_rows if paged_rows is not None else entries
+def _sections_from_stream(rows: list[tuple]) -> list[Section]:
+    """Build sections from (text, level, kind, page) rows.
+
+    Every caller passes the same 4-tuple shape, so the page number a format really
+    has (a PPTX slide number) reaches the Section instead of being dropped — that
+    was a bug: DOCX/PPTX/TXT sections all ended up citing page 1.
+    """
     headings = [i for i, row in enumerate(rows) if row[2] == "heading"]
     if not headings:
         return []
@@ -576,10 +630,11 @@ def _sections_from_stream(entries: list[tuple], paged: bool = False, paged_rows:
         body = [rows[i][0] for i in range(start + 1, end)]
         level = rows[start][1] if len(rows[start]) > 1 else 1
         page = rows[start][3] if len(rows[start]) > 3 else 0
-        text = " ".join(body).strip()
+        text = "\n".join(body).strip()
         sections.append(Section(
             id=f"s{n + 1}", heading=rows[start][0], level=min(int(level or 1), 3),
-            page=page, end_page=page, text=text[:12000], tokens=estimate_tokens(text[:12000]),
+            page=page, end_page=page, text=text[:MAX_SECTION_CHARS],
+            tokens=estimate_tokens(text[:MAX_SECTION_CHARS]),
         ))
     return [s for s in sections if s.heading]
 

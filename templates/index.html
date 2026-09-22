@@ -1244,6 +1244,11 @@
 
   const sleep = ms => new Promise(res => setTimeout(res, ms));
   const nf    = n => Number(n || 0).toLocaleString('en-KE');
+  function pageChip(page) {
+    const n = Number(page || 0);
+    return n > 0 ? `<span class="page-chip">p.${n}</span>` : '';
+  }
+
   function stripCitation(text) {
     return String(text || '').replace(/\s*\((?:p|pp|page)\.?\s*\d+(?:\s*[-–]\s*\d+)?\)\s*$/i, '').trim();
   }
@@ -1293,7 +1298,8 @@
         ${summaryStat('Sections found', sectionCount)}
         ${summaryStat('Text (approx tokens)', nf(p.tokens))}
         ${summaryStat('Structure', p.has_structure ? 'Headings detected' : 'Split by length')}
-      </div>`;
+      </div>
+      ${p.has_pages === false ? `<p class="text-xs text-slate-500">This format has no page numbers, so the notes will not carry page citations.</p>` : ''}`;
     }
 
     if (!p.scanned) {
@@ -1323,7 +1329,7 @@
           <div class="rounded-xl border border-slate-200 divide-y divide-slate-100">${p.sections.slice(0, 8).map(s => `
             <div class="flex items-start justify-between gap-3 px-3 py-2">
               <span class="text-xs text-slate-600 leading-snug">${esc(s.heading)}</span>
-              <span class="page-chip">p.${esc(String(s.page))}</span>
+              ${pageChip(s.page)}
             </div>`).join('')}${sectionCount > 8 ? `
             <div class="px-3 py-2 text-xs text-slate-400">+ ${sectionCount - 8} more section(s)</div>` : ''}
           </div></div>`;
@@ -1384,7 +1390,7 @@
       ${sections.length ? `<div class="rounded-xl border border-slate-200 divide-y divide-slate-100">${sections.map(s => `
         <div class="flex items-center justify-between gap-3 px-3 py-2">
           <span class="text-xs text-slate-600 truncate">${esc(s.heading)}</span>
-          <span class="page-chip">${s.status === 'done' ? 'done' : s.status === 'pending' ? 'p.' + esc(String(s.page)) : esc(s.status)}</span>
+          <span class="page-chip">${s.status === 'done' ? 'done' : esc(s.status)}</span>
         </div>`).join('')}</div>` : ''}`;
     $('summary-footer').innerHTML = stalled
       ? `<span class="text-xs text-slate-400">Progress is saved — nothing is lost.</span>
@@ -1414,7 +1420,7 @@
         if (d.notes) { currentNotes = d.notes; renderNotes(d.notes, d); break; }
         if (d.status === 'failed') { renderSummaryError(d.message || 'The summary failed.'); break; }
         renderSummaryProgress(d);
-        if (d.status === 'running' || d.status === 'pending') { await sleep(500); continue; }
+        if (d.status === 'running' || d.status === 'pending' || d.status === 'busy') { await sleep(700); continue; }
         break;
       }
     } catch (e) {
@@ -1426,10 +1432,12 @@
 
   function renderNotes(notes, meta) {
     const topics = notes.topics || [];
-    const chip = page => `<span class="page-chip">p.${esc(String(page))}</span>`;
+    const chip = pageChip;
+    const failed = Number((meta && meta.sections_failed) || 0);
     let html = `<div class="space-y-2">
       <h4 class="text-slate-800 font-semibold text-base leading-snug">${esc(notes.title || '')}</h4>
       <p class="text-xs text-slate-400">${nf(notes.pages)} pages · ${topics.length} section(s) · ${nf((meta && meta.tokens_spent) || 0)} tokens · ${esc(notes.model || '')} · ${esc((notes.generated_at || '').slice(0, 16).replace('T', ' '))}</p>
+      ${failed ? `<p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">${failed} section(s) could not be summarised — see the notes at the bottom.</p>` : ''}
     </div>`;
 
     if ((notes.remember_5 || []).length) {
@@ -1527,8 +1535,11 @@
       lines.push('## Remember these five', ...notes.remember_5.map((t, i) => `${i + 1}. ${stripCitation(t)}`), ``);
     }
     (notes.topics || []).forEach(topic => {
-      lines.push(`## ${topic.heading} (p.${topic.page})`);
-      (topic.bullets || []).forEach(b => lines.push(`- ${stripCitation(b.text || b)} (p.${b.page || topic.page})`));
+      lines.push(`## ${topic.heading}${topic.page ? ` (p.${topic.page})` : ''}`);
+      (topic.bullets || []).forEach(b => {
+        const page = b.page || topic.page;
+        lines.push(`- ${stripCitation(b.text || b)}${page ? ` (p.${page})` : ''}`);
+      });
       (topic.drug_table || []).forEach(row => lines.push(`- ${row.name} — ${row.class} — ${row.mechanism} ${row.note || ''}`.trim()));
       if (topic.key_terms && topic.key_terms.length) lines.push(`Key terms: ${topic.key_terms.join(', ')}`);
       if (topic.mnemonic) lines.push(`Mnemonic: ${topic.mnemonic}`);

@@ -61,9 +61,15 @@ class PassengerASGIAdapter:
     def _build(self) -> ASGIMiddleware:
         """Create the adapter and initialise the schema in its event loop."""
         middleware = ASGIMiddleware(self.app)
-        # Run inside the adapter's loop so the SQLite connection created here is
-        # never handed to a different event loop later on.
-        asyncio.run_coroutine_threadsafe(init_db(), middleware.loop).result()
+        try:
+            # Run inside the adapter's loop so the SQLite connection created here is
+            # never handed to a different event loop later on.
+            asyncio.run_coroutine_threadsafe(init_db(), middleware.loop).result()
+        except BaseException:
+            # Without this, a persistent startup failure (e.g. an unwritable database)
+            # would leak a new daemon thread *and* event loop on every single request.
+            middleware.loop.call_soon_threadsafe(middleware.loop.stop)
+            raise
         logger.info("PharmaScanKE ready under Passenger (pid %s)", os.getpid())
         return middleware
 

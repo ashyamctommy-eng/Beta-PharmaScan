@@ -17,7 +17,7 @@ instead of paying again. Results are cached by file hash forever.
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -28,16 +28,48 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.extract import Extraction, ExtractionError, estimate_tokens, extract_document
+from core.extract import (
+    CHARS_PER_TOKEN,
+    Extraction,
+    ExtractionError,
+    estimate_tokens,
+    extract_document,
+)
 from models.resource import Resource
 from models.summary import Summary, SummarySection, UsageEvent
 
 logger = logging.getLogger(__name__)
 
 DEPTHS = ("brief", "standard", "full")
+LEASE_SECONDS = 180      # a tick holds the document for this long, then the lease expires
+
+
+async def claim_lease(db: AsyncSession, summary_id: int) -> bool:
+    """Take the per-document lease for one tick (atomic, expires on its own).
+
+    Two tabs, a double submit, or two students opening the same cached file would
+    otherwise run the outline twice, create duplicate section rows and produce
+    duplicated notes.
+    """
+    from sqlalchemy import or_, update
+
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(Summary)
+        .where(Summary.id == summary_id,
+               or_(Summary.lease_until.is_(None), Summary.lease_until < now))
+        .values(lease_until=now + timedelta(seconds=LEASE_SECONDS)),
+        # synchronize_session=False: let SQLite do the comparison. SQLite hands
+        # datetimes back naive, and evaluating the criteria against the in-session
+        # object would raise "can't compare offset-naive and offset-aware datetimes".
+        execution_options={"synchronize_session": False},
+    )
+    await db.commit()
+    return bool(result.rowcount)
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 OUTLINE_SYSTEM = """You are building a study map for Kenyan D.Pharm (CDACC) students.
@@ -116,6 +148,24 @@ def parse_json_lenient(raw: str) -> Optional[dict]:
                 except json.JSONDecodeError:
                     start = None
     return None
+
+
+def as_int(value: Any, default: int) -> int:
+    """Coerce a model-provided number without ever raising.
+
+    Model output is untrusted input: `importance` arrives as 4, "4", "4/5" or
+    "high", and a citation as 12, "12" or "p.12". `int()` on those raises, which
+    used to abort a whole run (and re-charge for it on retry).
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+", value)
+        if match:
+            return int(match.group())
+    return default
 
 
 def normalize_text(text: str) -> str:
@@ -293,21 +343,26 @@ async def tokens_used_today(db: AsyncSession, client: str | None = None) -> int:
 
 
 async def budget_room(db: AsyncSession, client: str) -> tuple[int, str]:
-    """Return (remaining tokens, reason-if-exhausted)."""
+    """Return (tokens still available to this caller, reason-if-exhausted).
+
+    The answer is the smaller of the app-wide and per-client rooms, so a mid-section
+    guard against overspending is meaningful in both cases.
+    """
     global_used = await tokens_used_today(db)
-    if global_used >= settings.SUMMARISE_DAILY_TOKEN_BUDGET:
+    global_room = settings.SUMMARISE_DAILY_TOKEN_BUDGET - global_used
+    if global_room <= 0:
         return 0, (f"Today's summary budget is used up ({global_used:,} of "
                    f"{settings.SUMMARISE_DAILY_TOKEN_BUDGET:,} tokens). "
                    "Finished sections are saved — press Continue tomorrow, or raise "
                    "SUMMARISE_DAILY_TOKEN_BUDGET.")
-    if client:
-        client_used = await tokens_used_today(db, client)
-        if client_used >= settings.SUMMARISE_PER_IP_DAILY_TOKENS:
-            return 0, (f"This device has used its daily share ({client_used:,} of "
-                       f"{settings.SUMMARISE_PER_IP_DAILY_TOKENS:,} tokens). "
-                       "Try again tomorrow.")
-        return max(0, min(settings.SUMMARISE_DAILY_TOKEN_BUDGET, settings.SUMMARISE_PER_IP_DAILY_TOKENS) - client_used), ""
-    return settings.SUMMARISE_DAILY_TOKEN_BUDGET - global_used, ""
+    if not client:
+        return global_room, ""
+    client_used = await tokens_used_today(db, client)
+    client_room = settings.SUMMARISE_PER_IP_DAILY_TOKENS - client_used
+    if client_room <= 0:
+        return 0, (f"This device has used its daily share ({client_used:,} of "
+                   f"{settings.SUMMARISE_PER_IP_DAILY_TOKENS:,} tokens). Try again tomorrow.")
+    return min(global_room, client_room), ""
 
 
 # ── The pipeline ──────────────────────────────────────────────────────────────
@@ -318,6 +373,7 @@ class TickResult:
     sections_done: int
     sections_total: int
     tokens_spent: int
+    sections_failed: int = 0
     notes: Optional[dict] = None
     message: str = ""
     warnings: list[str] = field(default_factory=list)
@@ -334,6 +390,15 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
     """
     caller = caller or GroqCaller(settings.GROQ_API_KEY)
     budget_calls = max_calls or settings.SUMMARISE_CALLS_PER_REQUEST
+
+    if not await claim_lease(db, summary.id):
+        return TickResult(
+            status="busy", progress=0.0,
+            sections_done=summary.sections_done, sections_total=summary.sections_total,
+            tokens_spent=summary.tokens_spent, sections_failed=summary.sections_failed, calls_made=0,
+            message="Another run for this document is in progress — waiting for it.",
+        )
+    await db.refresh(summary)
     map_model = settings.GROQ_MAP_MODEL or settings.GROQ_MODEL
     reduce_model = settings.GROQ_SUMMARY_MODEL or settings.GROQ_MODEL
     warnings: list[str] = []
@@ -341,13 +406,14 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
     async def finish(status: str, message: str = "", notes: Optional[dict] = None) -> TickResult:
         summary.status = status
         summary.updated_at = datetime.now(timezone.utc)
+        summary.lease_until = None                 # release for the next tick
         await db.commit()
         total = summary.sections_total or 0
         return TickResult(
             status=status,
             progress=1.0 if status == "done" else (summary.sections_done / total if total else 0.0),
             sections_done=summary.sections_done, sections_total=total,
-            tokens_spent=summary.tokens_spent,
+            tokens_spent=summary.tokens_spent, sections_failed=summary.sections_failed,
             notes=notes or (_load_notes(summary) if status == "done" else None),
             message=message, warnings=warnings,
         )
@@ -357,7 +423,6 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
         return await finish("budget_exhausted", blocked)
 
     calls = 0
-    iterator = _planned_sections(extraction, summary.depth or "standard")
 
     # ── Stage 1: the study map ────────────────────────────────────────────────
     if not summary.outline_json:
@@ -375,7 +440,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
         if outcome.warning:
             warnings.append(outcome.warning)
         payload = outcome.payload or {}
-        importance = {s.get("id"): int(s.get("importance") or 3)
+        importance = {s.get("id"): as_int(s.get("importance"), 3)
                       for s in payload.get("sections", []) if isinstance(s, dict)}
         summary.outline_json = json.dumps(payload)
         summary.model = outcome.model
@@ -419,15 +484,14 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
 
         try:
             payload, spent, used_calls, notes_warnings = await _expand_section(
-                db, caller, summary, client_id, source, map_model, remaining
+                db, caller, summary, client_id, source, map_model, remaining, pending
             )
             warnings.extend(notes_warnings)
             pending.payload_json = json.dumps(payload)
             pending.status = "done"
             pending.tokens_spent = spent
             summary.sections_done += 1
-            summary.tokens_spent += spent
-            calls += used_calls
+            calls += used_calls          # tokens are recorded by _call(), once
             await db.commit()
         except RateLimited as exc:
             logger.warning("Groq rate limit while expanding %s: %s", source.id, exc)
@@ -440,6 +504,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             pending.status = "error"
             pending.payload_json = json.dumps({"error": message})
             summary.sections_done += 1
+            summary.sections_failed += 1
             warnings.append(f"Section '{source.heading}' could not be summarised: {message}")
             await db.commit()
 
@@ -465,7 +530,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             notes = _assemble_offline(summary, extraction, warnings)
             warnings.append(f"Synthesis call failed ({message}); notes were assembled without it.")
         summary.notes_json = json.dumps(notes)
-        summary.tokens_spent += notes.get("_reduce_tokens", 0)
+        summary.tokens_spent += 0        # the reduce call was recorded by _call()
         summary.warnings_json = json.dumps(warnings)
         summary.sections_done = summary.sections_total
         return await finish("done", "", notes)
@@ -518,24 +583,45 @@ async def _call(db: AsyncSession, caller: Caller, summary: Summary, client_id: s
 
 
 async def _expand_section(db: AsyncSession, caller: Caller, summary: Summary, client_id: str,
-                          section, model: str, remaining: int) -> tuple[dict, int, int, list[str]]:
-    """Summarise one section, chunking it if it exceeds the per-call input budget."""
+                          section, model: str, remaining: int,
+                          row: Optional[SummarySection] = None) -> tuple[dict, int, int, list[str]]:
+    """Summarise one section, chunking it if it exceeds the per-call input budget.
+
+    Each finished chunk is written to the row immediately. A section is often
+    several calls long, and the per-minute token limit makes a mid-section 429
+    likely; without this, the resume would re-run (and re-pay for) the chunks that
+    already succeeded.
+    """
     warnings: list[str] = []
-    budget = settings.SUMMARISE_MAX_INPUT_TOKENS
-    chunk_size = max(600, budget - 900)                 # leave room for prompt + output
+    # SUMMARISE_MAX_INPUT_TOKENS is tokens; _split_text counts characters. Convert
+    # (chars/4) and leave room for the prompt and the reply, or callers get ~4x more
+    # calls than the estimate quoted to the student.
+    budget_chars = settings.SUMMARISE_MAX_INPUT_TOKENS * CHARS_PER_TOKEN
+    chunk_chars = max(600, budget_chars - 1200)
     text = section.text
-    chunks = _split_text(text, chunk_size)
+    chunks = _split_text(text, chunk_chars)
     payloads: list[dict] = []
     spent = 0
     calls = 0
+    done_chunks = 0
+    if row is not None:
+        state = parse_json_lenient(row.payload_json or "") or {}
+        if state.get("_partial") and isinstance(state.get("_partials"), list):
+            payloads = [p for p in state["_partials"] if isinstance(p, dict)]
+            done_chunks = as_int(state.get("_chunks_done"), 0)
+            spent = as_int(state.get("_spent"), 0)
 
     for index, chunk in enumerate(chunks, start=1):
-        if spent and remaining and spent >= remaining:
+        if index <= done_chunks:
+            continue                                   # already paid for, and saved
+        if remaining is not None and spent >= remaining:
             raise RateLimited("Daily token budget reached mid-section; progress is saved.")
-        header = (f"Section: {section.heading}\nPages: p.{section.page}-{section.end_page}\n"
+        pages_line = f"Pages: p.{section.page}-{section.end_page}\n" if section.page else ""
+        header = (f"Section: {section.heading}\n{pages_line}"
                   f"Part {index} of {len(chunks)}\n\n--- BEGIN SECTION TEXT ---\n")
         outcome = await _call(db, caller, summary, client_id, kind="section", model=model,
-                              system=SECTION_SYSTEM, user=header + chunk + "\n--- END SECTION TEXT ---",
+                              system=section_system(bool(section.page)),
+                              user=header + chunk + "\n--- END SECTION TEXT ---",
                               max_tokens=settings.GROQ_SUMMARY_MAX_TOKENS, temperature=0.25)
         calls += 1
         spent += outcome.total_tokens
@@ -545,6 +631,11 @@ async def _expand_section(db: AsyncSession, caller: Caller, summary: Summary, cl
             warnings.append(f"Section '{section.heading}': the model's reply was not JSON; skipped.")
             continue
         payloads.append(outcome.payload)
+        if row is not None and len(chunks) > 1:
+            row.payload_json = json.dumps({
+                "_partial": True, "_chunks_done": index, "_partials": payloads, "_spent": spent,
+            })
+            await db.commit()
 
     if not payloads:
         return {"usable": False, "reason": "no usable model output"}, spent, calls, warnings
@@ -588,9 +679,9 @@ def _merge_payloads(payloads: list[dict], section) -> dict:
         for bullet in payload.get("bullets", []):
             if isinstance(bullet, dict):
                 text = str(bullet.get("text") or "").strip()
-                page = int(bullet.get("page") or section.page)
+                page = as_int(bullet.get("page"), section.page or 0)
             else:
-                text, page = str(bullet).strip(), section.page
+                text, page = str(bullet).strip(), section.page or 0
             if not text:
                 continue
             key = normalize_text(text)[:120]
@@ -632,10 +723,22 @@ def _merge_payloads(payloads: list[dict], section) -> dict:
 
 
 def _clamp_page(page: int, section) -> int:
-    """Keep citations inside the section's real page range."""
-    low = section.page or 1
+    """Keep citations inside the section's real page range (0 = no pages to cite)."""
+    if not section.page:
+        return 0                      # DOCX/TXT: no page numbers exist, so cite none
+    low = section.page
     high = max(section.end_page or low, low)
     return min(max(page, low), high)
+
+
+def section_system(has_pages: bool) -> str:
+    """The section prompt, with the citation rule matching the format."""
+    if has_pages:
+        return SECTION_SYSTEM
+    return SECTION_SYSTEM.replace(
+        "2. Every bullet must end with its source page in the form (p.12).",
+        "2. This format has no page numbers: do not add any citation.",
+    ).replace('{"text": "...", "page": 12}', '{"text": "..."}')
 
 
 # ── Final assembly ────────────────────────────────────────────────────────────
@@ -649,6 +752,9 @@ async def _assemble(db: AsyncSession, caller: Caller, summary: Summary, extracti
     topics: list[dict] = []
     for row in rows:
         payload = parse_json_lenient(row.payload_json or "") or {}
+        if payload.get("_partial"):
+            warnings.append(f"Section '{row.heading}' was only partly processed; press Continue.")
+            continue
         if payload.get("error"):
             warnings.append(f"Section '{row.heading}' failed: {payload['error']}")
             continue
@@ -769,11 +875,29 @@ def source_path(resource: Resource) -> Path:
     return Path(settings.UPLOAD_DIR) / resource.file_name
 
 
-def extract_resource(resource: Resource) -> Extraction:
+@functools.lru_cache(maxsize=8)
+def _load_source(path_str: str, mtime_ns: int, size: int) -> tuple[Extraction, str]:
+    """Parse *and* hash a document once per (path, mtime, size).
+
+    Without this, every preview and every tick re-parses and re-hashes the whole
+    upload: the preview endpoint is free and needs no key, and a run fires many
+    ticks, so a 50 MB PDF becomes a cheap way to keep a shared worker busy. The
+    cache key includes mtime and size, so replacing the file invalidates it.
+    """
+    path = Path(path_str)
+    return extract_document(path), file_sha256(path)
+
+
+def source_identity(resource: Resource) -> tuple[Extraction, str]:
     path = source_path(resource)
     if not path.exists():
         raise ExtractionError(f"The uploaded file for '{resource.title}' is no longer on disk.")
-    return extract_document(path)
+    stat = path.stat()
+    return _load_source(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def extract_resource(resource: Resource) -> Extraction:
+    return source_identity(resource)[0]
 
 
 async def get_summary(db: AsyncSession, resource_id: int) -> Optional[Summary]:
@@ -783,16 +907,21 @@ async def get_summary(db: AsyncSession, resource_id: int) -> Optional[Summary]:
 
 
 async def get_or_create_summary(db: AsyncSession, resource: Resource, *, depth: str) -> Summary:
-    path = source_path(resource)
-    if not path.exists():
-        raise ExtractionError("The uploaded file is missing on disk.")
-    digest = file_sha256(path)
+    digest = source_identity(resource)[1]
     summary = (await db.execute(select(Summary).where(Summary.file_hash == digest))).scalars().first()
     if summary is None:
         summary = Summary(resource_id=resource.id, file_hash=digest, file_name=resource.file_name,
                           depth=depth if depth in DEPTHS else "standard", status="pending")
         db.add(summary)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Another request created the same row first (same file, two clicks).
+            await db.rollback()
+            summary = (await db.execute(
+                select(Summary).where(Summary.file_hash == digest))).scalars().first()
+            if summary is None:                       # pragma: no cover - defensive
+                raise
         await db.refresh(summary)
     elif summary.depth != depth and summary.status not in ("running", "pending"):
         # A different depth was requested for an already-summarised document.

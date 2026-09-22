@@ -29,6 +29,7 @@ from core.database import get_db
 from core.extract import ExtractionError
 from core.summarise import (
     DEPTHS,
+    _load_notes,
     estimate_cost_tokens,
     extract_resource,
     get_or_create_summary,
@@ -111,16 +112,13 @@ async def summarise_status(resource_id: int, db: AsyncSession = Depends(get_db))
         "model": summary.model, "file_name": summary.file_name, "pages": summary.pages,
         "sections_done": summary.sections_done, "sections_total": summary.sections_total,
         "progress": (summary.sections_done / summary.sections_total) if summary.sections_total else 0.0,
+        "sections_failed": summary.sections_failed, "error": summary.error or "",
         "tokens_spent": summary.tokens_spent, "sections": state,
         "notes": None, "message": "", "warnings": [],
     }
     if summary.status == "done" and summary.notes_json:
-        import json
-
-        try:
-            payload["notes"] = json.loads(summary.notes_json)
-        except Exception:  # noqa: BLE001 - stored payload must never 500 the endpoint
-            logger.error("Summary %s has unreadable notes_json", summary.id)
+        # _load_notes() strips the internal bookkeeping key from the stored payload.
+        payload["notes"] = _load_notes(summary)
         payload["progress"] = 1.0
     return payload
 
@@ -150,10 +148,9 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
 
     summary = await get_or_create_summary(db, resource, depth=depth)
     if summary.status == "done" and summary.notes_json:
-        from core.summarise import _load_notes  # local import: internal helper
-
         return {"resource_id": resource_id, "status": "done", "progress": 1.0,
                 "sections_done": summary.sections_total, "sections_total": summary.sections_total,
+                "sections_failed": summary.sections_failed,
                 "tokens_spent": summary.tokens_spent, "notes": _load_notes(summary),
                 "message": "Already summarised — this document is cached.", "warnings": []}
 
@@ -163,9 +160,18 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - never leak a traceback to the browser
         logger.exception("Summary run failed for resource %s", resource_id)
-        summary.status = "failed"
-        summary.error = str(exc)[:500]
-        await db.commit()
+        # The failure may itself have been a DB error, which leaves the session needing
+        # a rollback; try to record it, but never let that turn a 502 into a 500.
+        try:
+            await db.rollback()
+            fresh = await db.get(type(summary), summary.id)
+            if fresh is not None:
+                fresh.status = "failed"
+                fresh.error = str(exc)[:500]
+                fresh.lease_until = None
+                await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.error("Could not record the failure for summary %s", summary.id)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "The summary run failed. The server log has the details; nothing was lost, "
@@ -176,6 +182,7 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
     return {
         "resource_id": resource_id, "status": result.status, "progress": result.progress,
         "sections_done": result.sections_done, "sections_total": result.sections_total,
+        "sections_failed": result.sections_failed,
         "tokens_spent": result.tokens_spent, "notes": result.notes,
         "message": result.message, "warnings": result.warnings, "sections": state,
     }
