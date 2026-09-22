@@ -46,8 +46,9 @@ from core.auth import (
     set_access_cookie,
     set_session_cookie,
     throttle_delay,
-    verify_password,
+    verify_credentials,
 )
+from core.ai import models_url, provider_label
 from core.config import settings
 from core.database import get_db
 from core.settings_store import SettingError, apply_overrides, describe, mask, save
@@ -59,7 +60,8 @@ router = APIRouter(prefix="/api", tags=["admin"])
 
 
 def _groq_base() -> str:
-    return (settings.GROQ_BASE_URL or "https://api.groq.com/openai/v1").rstrip("/")
+    """Where to ask the provider for its model list (same base the caller uses)."""
+    return models_url(settings.GROQ_BASE_URL).rsplit("/models", 1)[0]
 
 
 async def _list_models() -> dict:
@@ -86,7 +88,7 @@ async def _list_models() -> dict:
     except Exception:  # noqa: BLE001
         return {"ok": False, "models": [], "error": "Groq returned something that is not JSON."}
     models = sorted(str(item.get("id")) for item in data if isinstance(item, dict) and item.get("id"))
-    return {"ok": True, "models": models, "error": ""}
+    return {"ok": True, "models": models, "error": "", "provider": provider_label(settings.GROQ_BASE_URL)}
 
 
 # ── public ────────────────────────────────────────────────────────────────────
@@ -118,8 +120,8 @@ async def admin_login(payload: dict, request: Request, response: Response) -> di
                             f"Too many failed attempts. Try again in about {wait} seconds.")
 
     password = str((payload or {}).get("password") or "")
-    stored = admin_password_hash() or ""
-    if not verify_password(password, stored):
+    username = str((payload or {}).get("username") or settings.ADMIN_USERNAME or "admin")
+    if not verify_credentials(username, password):
         record_login_failure(client)
         throttle_delay()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong password.")
@@ -173,6 +175,7 @@ async def get_settings(db: AsyncSession = Depends(get_db),
     payload = await describe(db)
     payload["models"] = (await _list_models()).get("models", [])
     payload["base_url"] = _groq_base()
+    payload["provider"] = provider_label(settings.GROQ_BASE_URL)
     return payload
 
 

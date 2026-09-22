@@ -15,3 +15,7 @@ build/
 # cPanel / Phusion Passenger
 tmp/
 stderr.log
+
+# app diagnostics (see configure_logging in main.py)
+app.log
+app.log.*

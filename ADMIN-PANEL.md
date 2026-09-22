@@ -30,6 +30,17 @@ SESSION_SECRET=<python -m core.auth secret>
 **Quicker, less tidy:** `ADMIN_PASSWORD=choose-something-long` instead of the hash. It is
 hashed in memory at startup (scrypt, standard library — no bcrypt wheel to install).
 
+**Username** — optional, defaults to `admin`. Set `ADMIN_USERNAME` if you prefer something
+of your own:
+
+```dotenv
+ADMIN_USERNAME=YourName
+ADMIN_PASSWORD=choose-something-long
+```
+
+Both fields are compared in constant time, and a wrong username is refused before the
+password is even checked, so the failure looks the same either way.
+
 Then restart and check:
 
 ```bash
@@ -126,7 +137,7 @@ protection.
 | What you see | What it means |
 |---|---|
 | "No admin password is configured" | `ADMIN_PASSWORD(_HASH)` is not set, or the app was not restarted. `python -m core.auth check` says which. |
-| "Wrong password" | As it says. Username is irrelevant — there is only a password. |
+| "Wrong password" | The username or the password is wrong. There is one account: `ADMIN_USERNAME` (default `admin`). |
 | "Too many failed attempts" | The throttle. Wait out the window (about 15 minutes from the first failure). |
 | 403 "CSRF token missing or stale" | The page was open while the session expired. Reload and sign in again. |
 | 503 "The admin panel is not configured" | Same as the first row. |

@@ -84,6 +84,24 @@ class TestPasswordHashing(SettingsSandbox):
             auth.create_session()
 
 
+class TestUsernameAndPassword(SettingsSandbox):
+    def test_configured_username_is_required(self) -> None:
+        settings.ADMIN_PASSWORD = "a-long-enough-admin-password"
+        settings.ADMIN_PASSWORD_HASH = ""
+        settings.ADMIN_USERNAME = "Poriotke"
+        self.assertTrue(auth.verify_credentials("Poriotke", "a-long-enough-admin-password"))
+        self.assertFalse(auth.verify_credentials("poriotke", "a-long-enough-admin-password"))
+        self.assertFalse(auth.verify_credentials("admin", "a-long-enough-admin-password"))
+        self.assertFalse(auth.verify_credentials("Poriotke", "wrong"))
+        self.assertFalse(auth.verify_credentials("", "a-long-enough-admin-password"))
+
+    def test_defaults_to_admin_when_unset(self) -> None:
+        settings.ADMIN_PASSWORD = "a-long-enough-admin-password"
+        settings.ADMIN_PASSWORD_HASH = ""
+        settings.ADMIN_USERNAME = ""
+        self.assertTrue(auth.verify_credentials("admin", "a-long-enough-admin-password"))
+
+
 class TestSignedTokens(SettingsSandbox):
     def setUp(self) -> None:
         super().setUp()

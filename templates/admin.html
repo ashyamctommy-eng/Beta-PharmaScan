@@ -48,6 +48,7 @@
     <h2 class="font-semibold text-slate-800">Sign in</h2>
     <p class="text-sm text-slate-500 mt-1">The admin password is the one set on the server as <code class="text-xs bg-slate-100 px-1 rounded">ADMIN_PASSWORD</code>.</p>
     <form id="login-form" class="mt-4 space-y-3">
+      <input id="username" type="text" class="field" placeholder="Username" autocomplete="username" />
       <input id="password" type="password" class="field" placeholder="Admin password" autocomplete="current-password" required />
       <button type="submit" class="btn btn-primary w-full">Sign in</button>
     </form>
@@ -167,7 +168,8 @@ touch tmp/restart.txt</pre>
     event.preventDefault();
     try {
       const data = await api('/api/admin/login', {
-        method: 'POST', body: JSON.stringify({ password: $('password').value }),
+        method: 'POST',
+        body: JSON.stringify({ username: $('username').value.trim(), password: $('password').value }),
       });
       csrf = data.csrf;
       $('password').value = '';

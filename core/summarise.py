@@ -31,6 +31,15 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.ai import (
+    CallOutcome,
+    Caller,
+    ProviderError,
+    GroqCaller,               # re-exported: existing imports and tests use this name
+    OpenAICompatibleCaller,
+    make_caller,
+    parse_json_lenient,
+)
 from core.config import settings
 from core.extract import (
     CHARS_PER_TOKEN,
@@ -109,8 +118,6 @@ Rules:
 - "exam_traps": 1 to 3 confusions or mistakes students commonly make on this material.
 - Introduce no new facts: everything must be supported by the topics given."""
 
-JSON_REMINDER = "\n\nReturn ONLY valid JSON. No prose, no markdown fences."
-
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
 def file_sha256(path: Path) -> str:
@@ -119,35 +126,6 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def parse_json_lenient(raw: str) -> Optional[dict]:
-    """Models sometimes wrap JSON in fences or add a sentence. Recover what we can."""
-    if not raw:
-        return None
-    text = raw.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
-    try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else None
-    except json.JSONDecodeError:
-        pass
-    start, depth = None, 0
-    for index, char in enumerate(text):
-        if char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}" and depth:
-            depth -= 1
-            if depth == 0 and start is not None:
-                try:
-                    value = json.loads(text[start:index + 1])
-                    if isinstance(value, dict):
-                        return value
-                except json.JSONDecodeError:
-                    start = None
-    return None
 
 
 def as_int(value: Any, default: int) -> int:
@@ -186,114 +164,6 @@ def describe_error(exc: Exception) -> str:
         detail = body[:200]
     name = type(exc).__name__
     return f"{name}" + (f" (HTTP {status})" if status else "") + (f": {detail}" if detail else f": {exc}")
-
-
-class CallOutcome:
-    """What one model call produced."""
-
-    def __init__(self, text: str, model: str, input_tokens: int, output_tokens: int,
-                 total_tokens: int, payload: Optional[dict] = None, warning: str = "") -> None:
-        self.text = text
-        self.model = model
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-        self.total_tokens = total_tokens
-        self.payload = payload
-        self.warning = warning
-
-
-class Caller(Protocol):
-    """Interface the pipeline needs; tests inject a stub implementation."""
-
-    async def call(self, *, kind: str, model: str, system: str, user: str,
-                   max_tokens: int, temperature: float) -> CallOutcome: ...
-
-
-# ── Live Groq caller ──────────────────────────────────────────────────────────
-class GroqCaller:
-    """Thin wrapper over groq.AsyncGroq with defensive behaviour.
-
-    * JSON mode is attempted, and silently dropped if the model rejects it.
-    * A reasoning model that returns no `content` is reported with the actual
-      cause (its thinking spent the token budget), not as a mysterious failure.
-    * Malformed JSON is retried once with an explicit reminder.
-    """
-
-    def __init__(self, api_key: str, timeout: float = 90.0) -> None:
-        self.api_key = api_key
-        self.timeout = timeout
-        self._client = None
-        self._json_mode_ok = True
-
-    @property
-    def client(self):
-        if self._client is None:
-            from groq import AsyncGroq
-
-            # max_retries=1: the SDK retries 429/5xx internally and honours the vendor's
-            # retry-after, which on a shared host can block a worker for minutes. One
-            # retry absorbs a brief hiccup; anything longer is parked by the tick model
-            # ("press Continue"), which is friendlier than a hanging request.
-            kwargs: dict[str, Any] = {"api_key": self.api_key, "timeout": self.timeout,
-                                      "max_retries": 1}
-            if settings.GROQ_BASE_URL:
-                kwargs["base_url"] = settings.GROQ_BASE_URL
-            self._client = AsyncGroq(**kwargs)
-        return self._client
-
-    async def call(self, *, kind: str, model: str, system: str, user: str,
-                   max_tokens: int, temperature: float) -> CallOutcome:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        warning = ""
-        kwargs: dict[str, Any] = {"model": model, "messages": messages,
-                                  "max_tokens": max_tokens, "temperature": temperature}
-        if self._json_mode_ok:
-            kwargs["response_format"] = {"type": "json_object"}
-
-        try:
-            completion = await self.client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            if self._json_mode_ok and getattr(exc, "status_code", None) == 400:
-                # Model does not support response_format — retry without it.
-                self._json_mode_ok = False
-                warning = "model rejected JSON mode; continuing without it"
-                kwargs.pop("response_format", None)
-                completion = await self.client.chat.completions.create(**kwargs)
-            else:
-                raise
-
-        message = completion.choices[0].message if completion.choices else None
-        text = (getattr(message, "content", "") or "").strip()
-        reasoning = (getattr(message, "reasoning", "") or "").strip()
-
-        if not text and reasoning:
-            raise RuntimeError(
-                "The model returned reasoning but no answer: its thinking used up the whole "
-                f"token budget. Raise GROQ_SUMMARY_MAX_TOKENS (currently {max_tokens})."
-            )
-        usage = completion.usage
-        outcome = CallOutcome(
-            text=text,
-            model=getattr(completion, "model", model),
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-            warning=warning,
-        )
-        outcome.payload = parse_json_lenient(text)
-        if outcome.payload is None:
-            # One strict retry, then give up on this call.
-            reminder = user + JSON_REMINDER
-            retry = await self.call(kind=kind, model=model, system=system, user=reminder,
-                                    max_tokens=max_tokens, temperature=max(0.0, temperature - 0.1))
-            retry.total_tokens += outcome.total_tokens
-            retry.input_tokens += outcome.input_tokens
-            retry.output_tokens += outcome.output_tokens
-            if retry.payload is not None:
-                retry.warning = (retry.warning + "; " if retry.warning else "") + \
-                                "retried once after malformed JSON"
-            return retry
-        return outcome
 
 
 # ── Cost estimate + planning ──────────────────────────────────────────────────
@@ -398,7 +268,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
     Bounded on purpose: on shared hosting a request must not hold a worker for
     minutes, so the UI calls this repeatedly and shows progress between ticks.
     """
-    caller = caller or GroqCaller(settings.GROQ_API_KEY)
+    caller = caller or make_caller(settings.GROQ_API_KEY, settings.GROQ_BASE_URL)
     budget_calls = max_calls or settings.SUMMARISE_CALLS_PER_REQUEST
 
     if not await claim_lease(db, summary.id):
@@ -560,11 +430,13 @@ class InvalidApiKey(Exception):
 # ── Call plumbing ─────────────────────────────────────────────────────────────
 async def _call(db: AsyncSession, caller: Caller, summary: Summary, client_id: str, *,
                 kind: str, model: str, system: str, user: str,
-                max_tokens: int, temperature: float) -> CallOutcome:
+                max_tokens: int, temperature: float,
+                json_mode: bool = True) -> CallOutcome:
     """One model call, with usage recorded and 429s turned into RateLimited."""
     try:
         outcome = await caller.call(kind=kind, model=model, system=system, user=user,
-                                    max_tokens=max_tokens, temperature=temperature)
+                                    max_tokens=max_tokens, temperature=temperature,
+                                    json_mode=json_mode)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         if status in (401, 403):

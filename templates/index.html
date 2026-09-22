@@ -1335,7 +1335,11 @@
   }
 
   function stripCitation(text) {
-    return String(text || '').replace(/\s*\((?:p|pp|page)\.?\s*\d+(?:\s*[-–]\s*\d+)?\)\s*$/i, '').trim();
+    // The model often cites the page itself ("... (p.4).") *and* we render a page
+    // chip, which showed up twice. Drop a trailing citation, punctuation included.
+    return String(text || '')
+      .replace(/\s*\((?:p|pp|page)\.?\s*\d+(?:\s*[-–]\s*\d+)?\)[.,;:]?\s*$/i, '')
+      .trim();
   }
 
   function openSummary(resourceId, title) {

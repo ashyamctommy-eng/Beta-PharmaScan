@@ -29,6 +29,7 @@ from core.access import client_identifier
 from core.access import guard as guard_ai
 from core.config import settings
 from core.database import get_db
+from core.ai import make_caller
 from core.summarise import budget_room, record_usage
 from models.resource import Resource
 from schemas.analysis import AnalysisRequest, AnalysisResponse, Pharmacy180Ref
@@ -45,31 +46,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["pharmascan"])
 
-# ── Groq client (lazy, keyed on the key it was built with) ───────────────────
-_groq: Optional[AsyncGroq] = None
-_groq_key: Optional[str] = None
+# ── AI transport (Groq SDK, or any OpenAI-compatible endpoint) ───────────────
+def get_caller():
+    """The configured transport for /api/analyze.
 
-
-def get_groq() -> AsyncGroq:
-    """Build the client on demand, rebuilding it if the key changes.
-
-    The panel can change the key at runtime; without the key check the first client
-    would keep using the old key until the app restarted.
+    Built per request rather than cached: the admin panel can change the key or the
+    endpoint at any time, and a cached client would keep using the old one.
     """
-    global _groq, _groq_key
     if not settings.GROQ_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No Groq API key is configured. Set one in the admin panel, or in .env "
-                   "as GROQ_API_KEY=...",
+            detail="No API key is configured. Set one in the admin panel, or in .env as "
+                   "GROQ_API_KEY=...",
         )
-    if _groq is None or _groq_key != settings.GROQ_API_KEY:
-        kwargs = {"api_key": settings.GROQ_API_KEY}
-        if settings.GROQ_BASE_URL:
-            kwargs["base_url"] = settings.GROQ_BASE_URL
-        _groq = AsyncGroq(**kwargs)
-        _groq_key = settings.GROQ_API_KEY
-    return _groq
+    return make_caller(settings.GROQ_API_KEY, settings.GROQ_BASE_URL)
 
 
 # ── CDACC System Prompt ───────────────────────────────────────────────────────
@@ -312,7 +302,7 @@ async def analyze_content(body: AnalysisRequest, request: Request,
     if blocked:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, blocked)
 
-    client = get_groq()
+    caller_ai = get_caller()
 
     # Build messages based on text-only vs file-assisted mode
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -350,41 +340,53 @@ async def analyze_content(body: AnalysisRequest, request: Request,
         messages.append({"role": "user", "content": f"{subject_ctx}{body.prompt}"})
 
     try:
-        completion = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=messages,
-            max_tokens=settings.GROQ_MAX_TOKENS,
-            temperature=settings.GROQ_TEMPERATURE,
+        result = await caller_ai.call(
+            kind="analyze", model=settings.GROQ_MODEL,
+            system=SYSTEM_PROMPT,
+            user=messages[-1]["content"],          # the built prompt (file or text)
+            max_tokens=settings.GROQ_MAX_TOKENS, temperature=settings.GROQ_TEMPERATURE,
+            json_mode=False,                       # analysis is prose/markdown, never JSON
         )
     except HTTPException:
         raise
     except Exception as exc:
-        # Log full detail server-side; return generic message to client
-        logger.error("Groq call failed: %s: %s", type(exc).__name__, exc)
+        # Log the real reason (now reaches the host's error log), and tell the user
+        # something they can act on rather than a blanket "temporarily unavailable".
+        status_code = getattr(exc, "status_code", None)
+        logger.error("Analysis call failed (%s): %s", status_code or type(exc).__name__, exc)
+        if status_code == 429:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="The AI provider is rate-limiting this key right now. Wait a minute "
+                       "and try again, or switch to a different model in the admin panel.",
+            ) from exc
+        if status_code in (401, 403):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The AI provider rejected the configured API key. Check it in the "
+                       "admin panel (Test connection).",
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="AI analysis service is temporarily unavailable. Please try again.",
         ) from exc
 
-    if not completion.choices:
+    if not result.text:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Groq returned an empty choices list — no response generated.",
+            detail="The model returned no text — no response generated.",
         )
 
-    usage = getattr(completion, "usage", None)
     try:
         await record_usage(
-            db, kind="analyze", model=getattr(completion, "model", settings.GROQ_MODEL),
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-            resource_id=0, client=caller,
+            db, kind="analyze", model=result.model,
+            input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+            total_tokens=result.total_tokens, resource_id=0, client=caller,
         )
     except Exception as exc:  # noqa: BLE001 - bookkeeping must never fail the analysis
         logger.warning("Could not record analyze usage: %s", exc)
 
-    raw = completion.choices[0].message.content or "No response generated."
+    raw = result.text or "No response generated."
 
     # Strip <think>…</think> reasoning blocks from DeepSeek-R1
     import re as _re
@@ -413,6 +415,6 @@ async def analyze_content(body: AnalysisRequest, request: Request,
         analysis=analysis,
         concept=concept_key,
         pharmacy180_ref=pharmacy180_ref,
-        model=completion.model,
-        tokens_used=completion.usage.total_tokens if completion.usage else None,
+        model=result.model,
+        tokens_used=result.total_tokens or None,
     )

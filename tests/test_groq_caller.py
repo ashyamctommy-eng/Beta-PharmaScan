@@ -136,7 +136,8 @@ class TestGroqCaller(GroqCallerCase):
                 self._call(self._caller(mock))
         finally:
             mock.stop()
-        self.assertIn("GROQ_SUMMARY_MAX_TOKENS", str(ctx.exception))
+        self.assertIn("reasoning but no answer", str(ctx.exception))
+        self.assertIn("answer budget", str(ctx.exception))
 
     def test_rate_limit_is_turned_into_rate_limited_with_retry_after(self) -> None:
         # The script repeats so the assertion does not depend on how many times the
@@ -174,6 +175,104 @@ class TestGroqCaller(GroqCallerCase):
         self.assertEqual(outcome.payload, {"fixed": True})
         self.assertIn("retried once", outcome.warning)
         self.assertIn("Return ONLY valid JSON", mock.requests[1]["messages"][-1]["content"])
+
+
+class TestOpenAICompatibleTransport(GroqCallerCase):
+    """The transport used for OpenRouter / any OpenAI-compatible endpoint.
+
+    The Groq SDK hardcodes `/openai/v1/...` into its paths and cannot address
+    another provider's layout, so this second transport exists for exactly that.
+    """
+
+    def _caller(self, mock: MockGroq) -> S.OpenAICompatibleCaller:
+        S.settings.GROQ_BASE_URL = mock.base_url
+        return S.OpenAICompatibleCaller(api_key="sk-or-v1-test-key")
+
+    def test_make_caller_routes_by_endpoint(self) -> None:
+        S.settings.GROQ_BASE_URL = ""
+        self.assertIsInstance(S.make_caller("k"), S.GroqCaller)
+        S.settings.GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+        self.assertIsInstance(S.make_caller("k"), S.GroqCaller)
+        S.settings.GROQ_BASE_URL = "https://openrouter.ai/api/v1"
+        self.assertIsInstance(S.make_caller("k"), S.OpenAICompatibleCaller)
+
+    def test_parses_the_openai_shape_and_usage(self) -> None:
+        mock = MockGroq([(200, chat_response('{"usable": true}', prompt_tokens=200, completion_tokens=25))])
+        try:
+            outcome = self._call(self._caller(mock))
+        finally:
+            mock.stop()
+        self.assertEqual(outcome.payload, {"usable": True})
+        self.assertEqual(outcome.total_tokens, 225)
+        self.assertEqual(mock.requests[0]["response_format"], {"type": "json_object"})
+
+    def test_json_mode_is_opt_out_for_prose(self) -> None:
+        mock = MockGroq([(200, chat_response("## Beta-lactams\n\nThey inhibit synthesis."))])
+        try:
+            caller = self._caller(mock)
+            outcome = asyncio.run(caller.call(kind="analyze", model="m", system="s",
+                                              user="u", max_tokens=100, temperature=0.3,
+                                              json_mode=False))
+        finally:
+            mock.stop()
+        self.assertNotIn("response_format", mock.requests[0], "prose must not ask for JSON mode")
+        self.assertIsNone(outcome.payload)
+        self.assertIn("Beta-lactams", outcome.text)
+
+    def test_rejected_json_mode_falls_back(self) -> None:
+        mock = MockGroq([(400, {"error": {"message": "response_format is not supported"}}),
+                         (200, chat_response('{"ok": true}'))])
+        try:
+            outcome = self._call(self._caller(mock))
+        finally:
+            mock.stop()
+        self.assertEqual(outcome.payload, {"ok": True})
+        self.assertIn("JSON mode", outcome.warning)
+        self.assertNotIn("response_format", mock.requests[1])
+
+    def test_auth_failure_carries_the_status_code(self) -> None:
+        mock = MockGroq([(401, {"error": {"message": "invalid api key"}})])
+        try:
+            with self.assertRaises(S.ProviderError) as ctx:
+                self._call(self._caller(mock))
+        finally:
+            mock.stop()
+        self.assertEqual(ctx.exception.status_code, 401, "the pipeline maps 401 -> InvalidApiKey")
+
+    def test_rate_limit_is_mapped_by_the_pipeline(self) -> None:
+        mock = MockGroq([(429, {"error": {"message": "rate limited"}})])
+        try:
+            caller = self._caller(mock)
+            summary = S.Summary(resource_id=1, file_hash="h", file_name="f.pdf", depth="standard")
+
+            async def run():
+                async with _session() as db:
+                    db.add(summary)
+                    await db.commit()
+                    return await S._call(db, caller, summary, "client", kind="section",
+                                         model="m", system="s", user="u",
+                                         max_tokens=100, temperature=0.2)
+
+            with self.assertRaises(S.RateLimited):
+                asyncio.run(run())
+        finally:
+            mock.stop()
+
+    def test_reasoning_without_content_is_reported(self) -> None:
+        mock = MockGroq([(200, chat_response(content="", reasoning="thinking " * 50))])
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                self._call(self._caller(mock))
+        finally:
+            mock.stop()
+        self.assertIn("reasoning but no answer", str(ctx.exception))
+
+    def test_unreachable_endpoint_is_a_clear_error(self) -> None:
+        caller = S.OpenAICompatibleCaller(api_key="k", base_url="http://127.0.0.1:9/v1", timeout=3)
+        with self.assertRaises(S.ProviderError) as ctx:
+            asyncio.run(caller.call(kind="analyze", model="m", system="s", user="u",
+                                    max_tokens=10, temperature=0.2, json_mode=False))
+        self.assertIn("Could not reach", str(ctx.exception))
 
 
 def _session():

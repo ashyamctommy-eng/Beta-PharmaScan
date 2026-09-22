@@ -198,6 +198,8 @@ python -m unittest discover -s tests -t .      # all 37
 | Admin panel returns **403 CSRF token missing or stale** | The panel tab was open while the session expired (default 12h) | Reload and sign in again. |
 | Students see **"Vault access code"** | An access code is set in the panel | That is the gate working. Clear the code in the panel (revert) to make the AI features open again. |
 | Students see **401 code_required** from the API | Same as above — the app normally prompts for the code automatically | If a student's browser blocks the prompt, check the console; the endpoint expects `POST /api/unlock`. |
+| `/api/analyze` → **429 "rate-limiting this key"** | The provider is throttling this key (OpenRouter's `:free` models do this constantly) | Wait a minute, or switch to a paid model in the panel (`openai/gpt-oss-20b` is a fraction of a cent per document). |
+| `/api/analyze` → **503 "rejected the configured API key"** | The key does not belong to the configured provider | Groq keys start `gsk_`; OpenRouter keys start `sk-or-v1-`. Fix `GROQ_API_KEY` or `GROQ_BASE_URL`. |
 | Nothing helps | — | Read the real error: cPanel → **Metrics → Errors**, or the Python App's log viewer. Passenger prints tracebacks there, and `~/pharmascan/stderr.log` if present. |
 | “Short notes” → **Groq rejected the server's API key (HTTP 401)** | The key on the server is wrong, revoked, or was pasted with whitespace | Fix `GROQ_API_KEY` in `.env`, `touch tmp/restart.txt`. Keys are invalidated when regenerated in the Groq console. |
 | “Short notes” → **Groq is rate-limiting this key** | Free tier is ~8,000 tokens/minute | Nothing is lost: press **Continue**. Finished sections are saved. Bigger documents: use the **brief** depth, or raise `SUMMARISE_DAILY_TOKEN_BUDGET` / upgrade the Groq plan. |
@@ -272,7 +274,40 @@ rm -rf ~/pharmascan
 
 ---
 
-## 8. Alternative: container hosts (rollout.host, Render, Railway, Fly)
+## 8. Using a provider other than Groq (OpenRouter, a gateway)
+
+The app talks to any **OpenAI-compatible** endpoint. It picks the transport from
+`GROQ_BASE_URL`: Groq uses the official SDK, anything else uses a small HTTP transport
+(the SDK hardcodes `/openai/v1/...`, so it cannot address another provider's URLs).
+
+**OpenRouter** (keys look like `sk-or-v1-…`) — set both lines, then restart:
+
+```dotenv
+GROQ_API_KEY=sk-or-v1-...
+GROQ_BASE_URL=https://openrouter.ai/api/v1
+GROQ_MODEL=openai/gpt-oss-20b
+```
+
+Test it in the panel: **Test connection** reports the provider, the number of models your
+key can use, and whether your configured model is among them.
+
+Verified against a live OpenRouter key:
+
+| Model | Result |
+|---|---|
+| `openai/gpt-oss-20b` | works; ~1,240 tokens and ~12s for a short analysis, ~8,600 tokens for a 6-page standard summary |
+| `openai/gpt-oss-120b` | available, ~7× the price of the 20b |
+| `qwen/qwen3.8-27b:free` | **429 "Provider returned error"** — `:free` variants are saturated upstream and should not be used for a live class |
+
+Notes that matter in practice:
+
+- A Groq key (`gsk_…`) will **not** work on OpenRouter and vice versa. If the key is
+  rejected (401), check that it belongs to the provider in `GROQ_BASE_URL`.
+- `GROQ_MODEL` must be a model *that provider* serves. Groq's `llama-3.3-70b-versatile` does
+  not exist on OpenRouter; the equivalent there is `meta-llama/llama-3.3-70b-instruct`.
+- The token budgets in the panel apply to whichever provider is configured.
+
+## 9. Alternative: container hosts (rollout.host, Render, Railway, Fly)
 
 The `Dockerfile` in this repo runs the app the way it was written — `uvicorn main:app`, no
 Passenger, no `passenger_wsgi.py`, no WSGI bridge, no fork/spawn traps. If a host builds a

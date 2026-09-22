@@ -45,7 +45,7 @@ class StubCaller:
         self.fail_status = fail_status
         self.prose_once = prose_once
 
-    async def call(self, *, kind, model, system, user, max_tokens, temperature):
+    async def call(self, *, kind, model, system, user, max_tokens, temperature, json_mode=True):
         self.calls.append({"kind": kind, "user": user, "model": model})
         if self.fail_status:
             exc = RuntimeError("rate limited")

@@ -81,6 +81,17 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(digest.hex(), hash_hex)
 
 
+def verify_credentials(username: str, password: str) -> bool:
+    """Check the username *and* the password, in constant time.
+
+    The username is not a secret, but comparing it in constant time costs nothing and
+    keeps the failure path identical whether the username or the password was wrong.
+    """
+    expected_user = (settings.ADMIN_USERNAME or "admin").strip()
+    user_ok = hmac.compare_digest((username or "").strip(), expected_user)
+    return user_ok and verify_password(password, admin_password_hash() or "")
+
+
 def admin_password_hash() -> Optional[str]:
     """The configured admin hash: `ADMIN_PASSWORD_HASH`, else hash of `ADMIN_PASSWORD`."""
     configured = (settings.ADMIN_PASSWORD_HASH or "").strip()

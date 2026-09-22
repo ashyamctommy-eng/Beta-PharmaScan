@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     # Set ADMIN_PASSWORD (hashed in memory at startup) or, better, ADMIN_PASSWORD_HASH
     # from `python -m core.auth hash`. With neither set the panel refuses to open —
     # there is no default password, ever.
+    ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
     ADMIN_PASSWORD_HASH: str = ""
     SESSION_SECRET: str = ""              # optional; blank = derived from the password
