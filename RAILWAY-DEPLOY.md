@@ -1,17 +1,37 @@
 # Deploy on Railway (free tier)
 
-Read the first section before you start: **Railway's free trial is one-time, and yours is
-already spent.** What remains is the Free plan — $1 of credit per month, reset monthly.
+## 1. Which plan you are on, and what changes
 
-## 1. What "free" actually means here
+Railway's trial is **one-time: $5 of credit, valid for up to 30 days**, and it **expires in 30
+days whether or not you spend it**. When 30 days pass or the $5 is spent, the account
+**automatically reverts to the Free plan: $1 of credit per month**, which does not roll over.
 
-| | |
-|---|---|
-| Free plan | **$0/month + $1 of usage credit per month** (one replica, 0.5 GB RAM, 1 vCPU, 1 GB ephemeral storage, 0.5 GB volume) |
-| Usage prices | RAM **$10/GB/month**, CPU **$20/vCPU/month**, volume **$0.15/GB/month**, egress $0.05/GB |
-| The math | An always-on small container holds a few hundred MB and some CPU — roughly **$2–4/month**, i.e. more than the $1 credit |
-| Therefore | The service has to **sleep when nobody is using it**. That is what makes $1 enough |
-| If the credit runs out | Railway **stops your workloads** until the next cycle. On Free you cannot buy more credit or run up a bill |
+| | Trial | After it reverts (Free) |
+|---|---|---|
+| Credit | **$5, one-time, expires after 30 days** | **$1 per month** |
+| Limits | 1 GB RAM, **shared** vCPU, 5 services per project | 1 replica, 0.5 GB RAM, 1 vCPU, 0.5 GB volume |
+| Always-on app | ~$2–4/month — **affordable inside the $5** | more than the credit → **the service must sleep** |
+| If the credit runs out | reverts to Free | Railway **stops your workloads** until the next cycle; you cannot buy credit on Free |
+
+Usage prices are the same on both: RAM **$10/GB/month**, CPU **$20/vCPU/month**, volume
+$0.15/GB/month, egress $0.05/GB.
+
+**So why bother with the sleeping settings now?** Because the switch is automatic and
+unattended: if the app is always-on when the trial ends, it stops. Set it up once as below and
+that moment passes without you noticing. During the trial you can leave Serverless off if you
+prefer instant responses.
+
+### Two trial-specific traps
+
+- **Full trial vs limited trial.** Verification depends on your GitHub account's age and
+  activity. An unverified account gets the **Limited Trial: restricted outbound network access,
+  only a limited set of ports**. Both the AI calls and the database connection are outbound, so
+  a limited trial can fail in confusing ways. If deploys succeed but requests that need the
+  network fail, check **railway.com/verify**.
+- **Trial volumes are temporary.** Railway **deletes stateful volumes created by trial accounts
+  30 days after the credits expire**. That is another reason every setting here points at an
+  **external Neon database**: your vault, documents and notes sit outside Railway's trial
+  lifecycle, and surviving the revert is free.
 
 ## 2. The setting that makes it work: Serverless + `DB_POOL_MODE=null`
 
