@@ -69,7 +69,12 @@ Extrapolating at realistic textbook density (~2,500 chars/page):
 The preview quotes an **upper-bound estimate** before you commit, and the app enforces
 two ceilings: a per-client allowance and an app-wide daily budget
 (`SUMMARISE_DAILY_TOKEN_BUDGET`). That budget is the thing that protects your key if the
-endpoint is ever hit by someone you did not invite.
+endpoint is ever hit by someone you did not invite — and every AI call, including document
+analysis, is written to the same ledger the admin panel reports.
+
+The admin can also require a **vault access code** (once per device) before the AI features
+can be used, and can switch the whole feature off from the panel. See
+[ADMIN-PANEL.md](ADMIN-PANEL.md).
 
 ## Resumability, caching and concurrency
 

@@ -33,7 +33,10 @@ or *Python Selector* on Plesk/other panels). Then:
 | `cpanel_check.py` | **new** — pre-flight self-test | Turns "it 500s" into a named cause: Python version, `.env`, writable folders, schema, WAL, every route, and outbound HTTPS to `api.groq.com`. |
 | `core/extract.py`, `core/summarise.py`, `api/summary_routes.py`, `models/summary.py`, `templates/index.html` | **new** — “Short notes” from an uploaded PDF/DOCX/PPTX | Reads the document locally (free), maps its structure, then expands the sections that matter into exam-ready notes with page citations. See [PDF-SUMMARY.md](PDF-SUMMARY.md). Extraction libraries (`pypdf`, `python-docx`, `python-pptx`) are already in `requirements-cpanel.txt`. |
 | `tests/` | **new** — 37 tests | `python -m unittest discover -s tests -t .` runs the extraction and pipeline tests with no API key (the model is stubbed). PDF fixtures need `requirements-dev.txt`. |
-| `CPANEL-DEPLOY.md`, `PDF-SUMMARY.md` | **new** — docs | This file and the feature/cost guide. |
+| `core/auth.py`, `core/settings_store.py`, `api/admin_routes.py`, `models/setting.py`, `templates/admin.html` | **new** — admin panel at `/admin` | Session-cookie login (scrypt password, CSRF, throttling), the API key / models / budgets / kill switches editable from the browser with panel-over-server precedence, a live Groq model list, and a token-usage dashboard. See [ADMIN-PANEL.md](ADMIN-PANEL.md). |
+| `core/access.py`, `templates/index.html` | optional student gate | Set an access code in the panel and the AI features ask for it once per device, then retry the request the student was making. |
+| `CPANEL-DEPLOY.md`, `PDF-SUMMARY.md`, `ADMIN-PANEL.md` | **new** — docs | Deploy, feature/cost, and panel guides. |
+| `Dockerfile` | **new** — container path | For hosts that build an image (rollout.host, Render, Railway). Not used by cPanel. |
 | `.gitignore` | ignores `tmp/`, `stderr.log` | Passenger scratch files. |
 
 The two traps the entry point handles (both proven, not guessed):
@@ -123,7 +126,19 @@ default (`~/pharmascan/pharmascan.db`) is already correct, and the DB plus the
 `uploaded_notes/` folder are what persist on a cPanel host (that is the real advantage
 over Railway's free tier).
 
-### 2.5 Pre-flight check, then start
+### 2.5 Set the admin password (before the site is public)
+
+```bash
+cd ~/pharmascan
+python -m core.auth hash        # prompts; prints a scrypt hash
+nano .env                       # add ADMIN_PASSWORD_HASH=scrypt$... (and SESSION_SECRET)
+python -m core.auth check       # confirms what is configured
+```
+
+Without this, `/admin` stays closed (it will tell you so) and the AI endpoints are open to
+anyone with the URL. Full details: [ADMIN-PANEL.md](ADMIN-PANEL.md).
+
+### 2.6 Pre-flight check, then start
 
 ```bash
 cd ~/pharmascan
@@ -139,7 +154,7 @@ mkdir -p tmp && touch tmp/restart.txt
 **`touch tmp/restart.txt` is how you restart the app** after every code or `.env` change —
 Passenger only notices then. First load may take a few seconds.
 
-### 2.6 Verify from the outside
+### 2.7 Verify from the outside
 
 Open your URL and check, in order:
 
@@ -179,6 +194,10 @@ python -m unittest discover -s tests -t .      # all 37
 | Big PDF → `413` **from the server** (not JSON) | Apache `LimitRequestBody` | App limit is 50 MB; raise the server limit in the docroot `.htaccess`: `LimitRequestBody 104857600` (100 MB), restart. |
 | `database is locked` under load | Several Passenger processes writing SQLite at once | Restart with fewer processes (`PassengerMaxPoolSize 2` in the docroot `.htaccess`); or move to MySQL/MariaDB. |
 | `pip install` tries to compile `greenlet` | No wheel for that Python version | Pick Python 3.10–3.13, or ask your host to install `gcc`/`python3-devel`. |
+| `/admin` says **no admin password is configured** | `ADMIN_PASSWORD(_HASH)` is unset, or the app was not restarted | `python -m core.auth check`, then set it in `.env` and `touch tmp/restart.txt`. |
+| Admin panel returns **403 CSRF token missing or stale** | The panel tab was open while the session expired (default 12h) | Reload and sign in again. |
+| Students see **"Vault access code"** | An access code is set in the panel | That is the gate working. Clear the code in the panel (revert) to make the AI features open again. |
+| Students see **401 code_required** from the API | Same as above — the app normally prompts for the code automatically | If a student's browser blocks the prompt, check the console; the endpoint expects `POST /api/unlock`. |
 | Nothing helps | — | Read the real error: cPanel → **Metrics → Errors**, or the Python App's log viewer. Passenger prints tracebacks there, and `~/pharmascan/stderr.log` if present. |
 | “Short notes” → **Groq rejected the server's API key (HTTP 401)** | The key on the server is wrong, revoked, or was pasted with whitespace | Fix `GROQ_API_KEY` in `.env`, `touch tmp/restart.txt`. Keys are invalidated when regenerated in the Groq console. |
 | “Short notes” → **Groq is rate-limiting this key** | Free tier is ~8,000 tokens/minute | Nothing is lost: press **Continue**. Finished sections are saved. Bigger documents: use the **brief** depth, or raise `SUMMARISE_DAILY_TOKEN_BUDGET` / upgrade the Groq plan. |
@@ -249,3 +268,50 @@ cd ~/pharmascan && rm -f tmp/restart.txt
 # and (only if you want the data gone too)
 rm -rf ~/pharmascan
 ```
+
+
+---
+
+## 8. Alternative: container hosts (rollout.host, Render, Railway, Fly)
+
+The `Dockerfile` in this repo runs the app the way it was written — `uvicorn main:app`, no
+Passenger, no `passenger_wsgi.py`, no WSGI bridge, no fork/spawn traps. If a host builds a
+Dockerfile or takes a git push, deployment is genuinely simpler than cPanel.
+
+**But check what happens to your data.** PharmaScan keeps two things on local disk: the
+database (`pharmascan.db`, SQLite by default) and the uploaded documents
+(`uploaded_notes/`). A host with an **ephemeral filesystem** erases both on every restart —
+and free tiers restart often.
+
+Concretely, as of this writing **rollout.host's free plan** states that apps *sleep after 15
+minutes without traffic*, that *servers may restart, so keep persistent state in Postgres*,
+and that it has *no uptime guarantee*; its always-on plan is listed as "coming soon". So on
+that plan, today: your SQLite file and every uploaded PDF would disappear when the app
+sleeps, and short-notes results would be lost with them.
+
+Two ways to use a container host properly:
+
+1. **Move the database off the container** (recommended):
+   ```dotenv
+   DATABASE_URL=postgresql+asyncpg://user:password@host:5432/pharmascan
+   ```
+   The app already supports this (`asyncpg` is in `requirements.txt`; the SQLite-only
+   connection argument is applied conditionally) — verified end to end against PostgreSQL 14,
+   including the full pipeline. **Uploaded files still need somewhere to live**: use the
+   host's object storage, or treat uploads as temporary.
+2. **Or give the container a persistent volume** and point `uploaded_notes/` and the
+   database at it (`UPLOAD_DIR` / `DATABASE_URL`).
+
+**cPanel's advantage is a real disk.** If the vault must keep the files students upload,
+cPanel (or any host with persistent storage) needs no extra work; a sleep-happy free tier
+needs Postgres plus object storage first.
+
+### Which to choose
+
+| | cPanel (this guide) | Container host (Dockerfile) |
+|---|---|---|
+| Python/FastAPI | via Passenger + the included bridge | native, `uvicorn main:app` |
+| Setup effort | moderate (Setup Python App, env, restart file) | low, if the host builds the image |
+| Database + uploads | **persist on the account's disk** | persist only with Postgres + a volume/object storage |
+| Free tiers | usually not free, cheap | often free, but may sleep and lose disk state |
+| Best for | keeping the vault as it is now | a demo, or a deployment ready to move data off disk |

@@ -54,6 +54,21 @@ class Settings(BaseSettings):
     # too low and the answer comes back empty.
     GROQ_SUMMARY_MAX_TOKENS: int = 8000
 
+    # ── Admin panel ───────────────────────────────────────────────────────────
+    # Set ADMIN_PASSWORD (hashed in memory at startup) or, better, ADMIN_PASSWORD_HASH
+    # from `python -m core.auth hash`. With neither set the panel refuses to open —
+    # there is no default password, ever.
+    ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
+    ADMIN_PASSWORD_HASH: str = ""
+    SESSION_SECRET: str = ""              # optional; blank = derived from the password
+    ADMIN_SESSION_HOURS: int = 12
+
+    # ── Access gate for the AI endpoints ──────────────────────────────────────
+    # Blank = the AI endpoints are open to anyone (the token budgets still apply).
+    # Set a code from the panel to make students unlock the vault once per device.
+    ACCESS_CODE: str = ""
+    ANALYZE_ENABLED: bool = True
+
     # ── Summariser limits (cost control) ──────────────────────────────────────
     SUMMARISE_ENABLED: bool = True
     SUMMARISE_MAX_INPUT_TOKENS: int = 5000     # per model call

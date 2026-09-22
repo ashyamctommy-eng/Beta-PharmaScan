@@ -638,6 +638,28 @@
   </div>
 </div>
 
+<div id="unlock-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+  <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 space-y-4">
+    <div class="flex items-start gap-3">
+      <div class="w-10 h-10 bg-teal-50 rounded-xl flex items-center justify-center flex-shrink-0">
+        <svg class="w-5 h-5 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+      </div>
+      <div>
+        <h3 class="text-slate-800 font-semibold">Vault access code</h3>
+        <p class="text-slate-500 text-sm mt-1">Ask your lecturer for the code. You only enter it once on this device.</p>
+      </div>
+    </div>
+    <form id="unlock-form" class="space-y-3">
+      <input id="unlock-input" type="text" autocomplete="off" placeholder="Access code"
+        class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-200 focus:border-teal-500" />
+      <div class="flex justify-end gap-3">
+        <button type="button" id="unlock-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Cancel</button>
+        <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-lg transition shadow-sm">Unlock</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div id="toast" role="alert" class="hidden fixed bottom-6 right-6 max-w-xs z-50 rounded-xl shadow-lg px-4 py-3 flex items-center gap-3 text-sm font-medium">
   <svg id="toast-icon" class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"></svg>
   <span id="toast-msg"></span>
@@ -1068,14 +1090,12 @@
 
     try {
       const payload = { prompt, file_data: fileData, file_name: fileName, text_only: textOnly, subject: selectedSubject || null };
-      const r = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      let d = {};
-      try { d = await r.json(); } catch { /* non-JSON body (e.g. Railway 502/504 HTML) */ }
-      if (!r.ok) { showToast(d.detail || `Analysis failed (HTTP ${r.status}).`, 'error'); return; }
+      const { response: r, data: d } = await postJsonWithUnlock('/api/analyze', payload);
+      if (!r.ok) {
+        const detail = typeof d.detail === 'string' ? d.detail
+          : (d.detail && d.detail.message) || `Analysis failed (HTTP ${r.status}).`;
+        showToast(detail, 'error'); return;
+      }
 
       rawAnalysis = d.analysis;
       lastConcept = d.concept || '';
@@ -1225,6 +1245,71 @@
 
   /* ── Saved search filter ─────────────────────────────── */
   $('saved-search').addEventListener('input', renderSavedCards);
+
+  /* ── Access code ───────────────────────────────────────
+     Only used when the admin has set an ACCESS_CODE in the panel. The AI
+     endpoints answer 401 with {code_required: true}; we ask once, unlock, and
+     retry the original request so the student never sees a dead end. */
+  let unlockResolver = null;
+
+  function promptForCode() {
+    return new Promise(resolve => {
+      unlockResolver = resolve;
+      const input = $('unlock-input');
+      input.value = '';
+      $('unlock-modal').classList.remove('hidden');
+      setTimeout(() => input.focus(), 50);
+    });
+  }
+
+  function closeUnlock(result) {
+    $('unlock-modal').classList.add('hidden');
+    const resolver = unlockResolver;
+    unlockResolver = null;
+    if (resolver) resolver(result);
+  }
+
+  $('unlock-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const code = $('unlock-input').value.trim();
+    if (!code) return;
+    try {
+      const r = await fetch('/api/unlock', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      let d = {};
+      try { d = await r.json(); } catch { /* ignore */ }
+      if (!r.ok) { showToast(typeof d.detail === 'string' ? d.detail : 'That code is not right.', 'error'); return; }
+      showToast('Unlocked — try again.', 'success');
+      closeUnlock(true);
+    } catch { showToast('Network error — try again.', 'error'); }
+  });
+  $('unlock-cancel').addEventListener('click', () => closeUnlock(false));
+  $('unlock-modal').addEventListener('click', e => { if (e.target === $('unlock-modal')) closeUnlock(false); });
+
+  function codeRequired(response, data) {
+    return response.status === 401 && data && data.detail
+      && typeof data.detail === 'object' && data.detail.code_required;
+  }
+
+  async function postJsonWithUnlock(url, body) {
+    const send = () => fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    let response = await send();
+    let data = {};
+    try { data = await response.json(); } catch { data = {}; }
+    if (codeRequired(response, data)) {
+      const unlocked = await promptForCode();
+      if (unlocked) {
+        response = await send();
+        try { data = await response.json(); } catch { data = {}; }
+      }
+    }
+    return { response, data };
+  }
 
   /* ── Short notes (document summariser) ───────────────
      Three states: a FREE preview (structure + honest token cost, computed by the
@@ -1411,12 +1496,13 @@
     renderSummaryProgress({ status:'running', sections_done:0, sections_total:0, message:'Building the study map…' });
     try {
       for (let tick = 0; tick < 60; tick++) {
-        const r = await fetch(`/api/summarise/${summaryId}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ depth: summaryDepth })
-        });
-        const d = await r.json();
-        if (!r.ok) { renderSummaryError(d.detail || 'The summary could not be generated.'); break; }
+        const { response: r, data: d } = await postJsonWithUnlock(
+          `/api/summarise/${summaryId}`, { depth: summaryDepth });
+        if (!r.ok) {
+          const detail = typeof d.detail === 'string' ? d.detail
+            : (d.detail && d.detail.message) || 'The summary could not be generated.';
+          renderSummaryError(detail); break;
+        }
         if (d.notes) { currentNotes = d.notes; renderNotes(d.notes, d); break; }
         if (d.status === 'failed') { renderSummaryError(d.message || 'The summary failed.'); break; }
         renderSummaryProgress(d);

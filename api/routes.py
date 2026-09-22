@@ -11,6 +11,7 @@ Endpoints:
   POST   /api/analyze        – AI pharmacy analysis (text or file)
 """
 
+import logging
 import os
 import re
 import unicodedata
@@ -18,14 +19,17 @@ from pathlib import Path
 from typing import Optional
 
 import aiofiles
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from groq import AsyncGroq
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.access import client_identifier
+from core.access import guard as guard_ai
 from core.config import settings
 from core.database import get_db
+from core.summarise import budget_room, record_usage
 from models.resource import Resource
 from schemas.analysis import AnalysisRequest, AnalysisResponse, Pharmacy180Ref
 from schemas.resource import (
@@ -37,21 +41,34 @@ from schemas.resource import (
     SubjectCount,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["pharmascan"])
 
-# ── Groq client (lazy) ────────────────────────────────────────────────────────
+# ── Groq client (lazy, keyed on the key it was built with) ───────────────────
 _groq: Optional[AsyncGroq] = None
+_groq_key: Optional[str] = None
 
 
 def get_groq() -> AsyncGroq:
-    global _groq
-    if _groq is None:
-        if not settings.GROQ_API_KEY:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="GROQ_API_KEY environment variable is not set.",
-            )
-        _groq = AsyncGroq(api_key=settings.GROQ_API_KEY)
+    """Build the client on demand, rebuilding it if the key changes.
+
+    The panel can change the key at runtime; without the key check the first client
+    would keep using the old key until the app restarted.
+    """
+    global _groq, _groq_key
+    if not settings.GROQ_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No Groq API key is configured. Set one in the admin panel, or in .env "
+                   "as GROQ_API_KEY=...",
+        )
+    if _groq is None or _groq_key != settings.GROQ_API_KEY:
+        kwargs = {"api_key": settings.GROQ_API_KEY}
+        if settings.GROQ_BASE_URL:
+            kwargs["base_url"] = settings.GROQ_BASE_URL
+        _groq = AsyncGroq(**kwargs)
+        _groq_key = settings.GROQ_API_KEY
     return _groq
 
 
@@ -282,7 +299,19 @@ async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)) -> Messa
 
 # ── POST /api/analyze ─────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=AnalysisResponse, summary="AI pharmacy analysis")
-async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
+async def analyze_content(body: AnalysisRequest, request: Request,
+                          db: AsyncSession = Depends(get_db)) -> AnalysisResponse:
+    # Kill switch + optional access code, resolved from the panel first.
+    await guard_ai(request, db, feature="analyze")
+
+    # Document analysis spends the same quota as the summaries, so it is held to the
+    # same budget and written to the same ledger — otherwise the panel's usage
+    # numbers would be a lie and this endpoint an unlimited tap on the key.
+    caller = client_identifier(request)
+    _remaining, blocked = await budget_room(db, caller)
+    if blocked:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, blocked)
+
     client = get_groq()
 
     # Build messages based on text-only vs file-assisted mode
@@ -331,8 +360,7 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
         raise
     except Exception as exc:
         # Log full detail server-side; return generic message to client
-        import logging as _log
-        _log.getLogger(__name__).error("Groq call failed: %s: %s", type(exc).__name__, exc)
+        logger.error("Groq call failed: %s: %s", type(exc).__name__, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="AI analysis service is temporarily unavailable. Please try again.",
@@ -343,6 +371,18 @@ async def analyze_content(body: AnalysisRequest) -> AnalysisResponse:
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Groq returned an empty choices list — no response generated.",
         )
+
+    usage = getattr(completion, "usage", None)
+    try:
+        await record_usage(
+            db, kind="analyze", model=getattr(completion, "model", settings.GROQ_MODEL),
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            resource_id=0, client=caller,
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must never fail the analysis
+        logger.warning("Could not record analyze usage: %s", exc)
 
     raw = completion.choices[0].message.content or "No response generated."
 

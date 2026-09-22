@@ -100,11 +100,18 @@ def check_database() -> None:
         return
 
     async def _run() -> None:
+        from core.database import engine
+
+        url = engine.url
+        # Show the driver and host, never the credentials.
+        where = f"{url.drivername} → {url.host or 'local'}:{url.port or ''}/{url.database or ''}"
+        record(OK, "Database engine", where)
         await init_db()
         record(OK, "Schema created", "init_db() ran (tables exist)")
         async with AsyncSessionLocal() as session:
-            journal = (await session.execute(text("PRAGMA journal_mode"))).scalar()
-            record(OK, "SQLite journal_mode", str(journal))
+            if url.drivername.startswith("sqlite"):
+                journal = (await session.execute(text("PRAGMA journal_mode"))).scalar()
+                record(OK, "SQLite journal_mode", str(journal))
             count = (await session.execute(text("SELECT COUNT(*) FROM resources"))).scalar()
             record(OK, "resources table readable", f"{count} row(s)")
 

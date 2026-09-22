@@ -342,6 +342,16 @@ async def tokens_used_today(db: AsyncSession, client: str | None = None) -> int:
     return int((await db.execute(stmt)).scalar() or 0)
 
 
+async def record_usage(db: AsyncSession, *, kind: str, model: str, input_tokens: int = 0,
+                       output_tokens: int = 0, total_tokens: int = 0,
+                       resource_id: int = 0, client: str = "") -> None:
+    """Append to the token ledger that the panel reports and the budget enforces."""
+    db.add(UsageEvent(kind=kind, model=model, input_tokens=input_tokens,
+                      output_tokens=output_tokens, total_tokens=total_tokens,
+                      resource_id=resource_id, client=(client or "")[:64]))
+    await db.commit()
+
+
 async def budget_room(db: AsyncSession, client: str) -> tuple[int, str]:
     """Return (tokens still available to this caller, reason-if-exhausted).
 

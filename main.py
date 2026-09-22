@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from api.admin_routes import router as admin_router
 from api.routes import router as api_router
 from api.summary_routes import router as summary_router
 from core.config import settings
@@ -70,12 +71,21 @@ templates = Jinja2Templates(directory=str(settings.TEMPLATES_DIR))
 # ── API routers ───────────────────────────────────────────────────────────────
 app.include_router(api_router)
 app.include_router(summary_router)
+app.include_router(admin_router)
 
 
 # ── Root route ────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+# ── Admin panel ───────────────────────────────────────────────────────────────
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+async def admin_page(request: Request) -> HTMLResponse:
+    """The panel shell. Everything it shows comes from /api/admin/*, which is
+    authenticated; the page itself contains no secrets."""
+    return templates.TemplateResponse("admin.html", {"request": request})
 
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────
