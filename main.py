@@ -52,7 +52,7 @@ def configure_logging() -> None:
         root.addHandler(stream)
     try:
         handler = logging.handlers.RotatingFileHandler(
-            Path(settings.BASE_DIR) / "app.log", maxBytes=512 * 1024, backupCount=2,
+            Path(settings.DATA_DIR) / "app.log", maxBytes=512 * 1024, backupCount=2,
             encoding="utf-8")
         handler.setFormatter(formatter)
         root.addHandler(handler)

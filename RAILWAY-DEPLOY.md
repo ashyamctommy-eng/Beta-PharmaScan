@@ -1,6 +1,9 @@
-# Deploy on Railway (free tier)
+# Deploy on Railway — everything on Railway
 
-## 1. Which plan you are on, and what changes
+One project, one service, one volume. No external database, no second host, no object
+storage: the SQLite database and the uploaded documents both live on a Railway volume.
+
+## 1. Your plan, and what changes when it does
 
 Railway's trial is **one-time: $5 of credit, valid for up to 30 days**, and it **expires in 30
 days whether or not you spend it**. When 30 days pass or the $5 is spent, the account
@@ -9,74 +12,46 @@ days whether or not you spend it**. When 30 days pass or the $5 is spent, the ac
 | | Trial | After it reverts (Free) |
 |---|---|---|
 | Credit | **$5, one-time, expires after 30 days** | **$1 per month** |
-| Limits | 1 GB RAM, **shared** vCPU, 5 services per project | 1 replica, 0.5 GB RAM, 1 vCPU, 0.5 GB volume |
-| Always-on app | ~$2–4/month — **affordable inside the $5** | more than the credit → **the service must sleep** |
-| If the credit runs out | reverts to Free | Railway **stops your workloads** until the next cycle; you cannot buy credit on Free |
+| Limits | 1 GB RAM, **shared** vCPU, 5 services/project, **3 volumes** | 0.5 GB RAM, 1 vCPU, 1 replica, **1 volume** |
+| Volume size | 0.5 GB | 0.5 GB |
+| Always-on app | ~$2–4/month — fits in the $5 | more than the credit → **the service must sleep** |
 
 Usage prices are the same on both: RAM **$10/GB/month**, CPU **$20/vCPU/month**, volume
-$0.15/GB/month, egress $0.05/GB.
+**$0.15/GB/month** (0.5 GB ≈ $0.08/month), egress $0.05/GB.
 
-**So why bother with the sleeping settings now?** Because the switch is automatic and
-unattended: if the app is always-on when the trial ends, it stops. Set it up once as below and
-that moment passes without you noticing. During the trial you can leave Serverless off if you
-prefer instant responses.
+**Why bother with the sleeping settings now?** Because the switch is automatic and unattended:
+an always-on service stops when the trial ends. Set it up once and that moment passes quietly.
+During the trial you can leave Serverless off if you prefer instant responses.
 
-### Two trial-specific traps
+## 2. The architecture
 
-- **Full trial vs limited trial.** Verification depends on your GitHub account's age and
-  activity. An unverified account gets the **Limited Trial: restricted outbound network access,
-  only a limited set of ports**. Both the AI calls and the database connection are outbound, so
-  a limited trial can fail in confusing ways. If deploys succeed but requests that need the
-  network fail, check **railway.com/verify**.
-- **Trial volumes are temporary.** Railway **deletes stateful volumes created by trial accounts
-  30 days after the credits expire**. That is another reason every setting here points at an
-  **external Neon database**: your vault, documents and notes sit outside Railway's trial
-  lifecycle, and surviving the revert is free.
-
-## 2. The setting that makes it work: Serverless + `DB_POOL_MODE=null`
-
-Railway's **Serverless** (formerly App Sleeping) puts a service to sleep after ~5–10 minutes
-and wakes it on the next request, so you are only billed while it is actually doing
-something. It decides "idle" from a service's **outbound** traffic.
-
-That is the whole problem: this app holds a **pool of database connections open**, and an open
-connection is outbound traffic. Leave it as-is and the service never sleeps, so the $1 credit
-is spent in about a week.
-
-`DB_POOL_MODE=null` fixes it — one connection per request, closed immediately:
-
-```dotenv
-DB_POOL_MODE=null        # lets a sleeping host sleep; costs a few tens of ms per request
+```
+Railway project
+└── service: pharmascan  (built from this repo's Dockerfile)
+    ├── /app                     ← the code, wiped and rebuilt on every deploy
+    └── /app/data  ← VOLUME      ← pharmascan.db + uploaded_notes/ + app.log
 ```
 
-Verified: with `DB_POOL_MODE=null` and a plain `postgresql://…?sslmode=disable` URL
-(exactly what Railway hands you), the stateless app runs against PostgreSQL with the full
-HTTP suites green.
+Set **`DATA_DIR=/app/data`** and mount the volume at **`/app/data`**. That one variable moves the
+SQLite database, the uploaded documents *and* the log together. Without it the app writes beside
+its code, and every redeploy quietly returns an empty vault.
 
-## 3. Database: reuse your Neon database
+Mount the volume at `/app/data`, **not at `/app`**: a mount at `/app` would shadow the
+application code itself.
 
-- **Don't** add Railway's Postgres plugin on the free path: it is a second service that also
-  burns the same $1 credit, and its open connections make the app harder to sleep.
-- Use the **Neon** database from the Render guide instead. It is free, permanent, and
-  auto-suspends when idle.
-- **No volume needed.** With `STORAGE_BACKEND=database` the documents live in the database,
-  so you dodge the volume cost, the 0.5 GB volume cap, and the "no replicas with a volume"
-  limitation.
-- Use Neon's **direct** host (no `-pooler`): asyncpg uses prepared statements, which PgBouncer
-  in transaction mode can reject.
+## 3. Deploy
 
-## 4. Deploy
-
-1. Railway → **New Project → Deploy from GitHub repo** → pick the app.
-2. Railway finds the `Dockerfile` and builds with it — no config file needed. (I deliberately
-   ship no `railway.json`/`railway.toml`: Railway deprecated Config-as-Code in favour of
-   Infrastructure-as-Code, and the Dockerfile is discovered on its own anyway.)
-3. Add the variables:
+1. **Push this code to your repository** (it is on GitHub already).
+2. Railway → **New Project → Deploy from GitHub repo** → pick the repository. Railway finds the
+   `Dockerfile` and builds with it; there is no config file to add. (I deliberately ship no
+   `railway.json`: Railway deprecated Config-as-Code in favour of Infrastructure-as-Code, and it
+   discovers the Dockerfile on its own.)
+3. **Attach the volume**: service → right-click → **Attach Volume** → mount path **`/app/data`**.
+4. **Variables** (service → Variables):
 
 ```dotenv
-DATABASE_URL=postgresql://user:password@ep-xxx.region.aws.neon.tech/neondb?sslmode=require
-STORAGE_BACKEND=database
-DB_POOL_MODE=null
+DATA_DIR=/app/data
+STORAGE_BACKEND=disk
 GROQ_API_KEY=sk-or-v1-...
 GROQ_BASE_URL=https://openrouter.ai/api/v1
 GROQ_MODEL=openai/gpt-oss-20b
@@ -88,53 +63,73 @@ ACCESS_CODE=<a code your class can remember>
 MAX_UPLOAD_SIZE_MB=25
 ```
 
-You can paste the URL exactly as Neon or Railway gives it: `core/config.py` rewrites
-`postgres://`/`postgresql://` to `postgresql+asyncpg://` and `sslmode=` to `ssl=`.
+5. **Generate a domain**: service → Settings → Networking → **Generate Domain**.
+6. **Serverless** (optional but recommended — see §1): service → Settings → **Serverless**.
+   With SQLite on a volume there is no outbound database traffic, so the service sleeps cleanly;
+   the only outbound traffic is the AI call itself.
 
-4. **Enable Serverless** (service → Settings), and **leave the healthcheck path unset**: a
-   periodic healthcheck makes the app respond, and responses are outbound traffic that resets
-   the idle timer.
-
-## 5. Verify
+## 4. Verify
 
 | Check | Expected |
 |---|---|
-| Open the app URL | loads (first hit after a sleep: cold boot, ~5–15 s; a 502 on that first request is documented Railway behaviour) |
-| `/api/notes` | `{"total":0,…}` — the app reached Neon |
-| `/admin` → sign in → Test connection | your key's models are listed |
-| Upload a PDF → Short notes → Generate | real notes with page numbers |
-| Leave it 20 minutes, then reload | cold boot, and **nothing is lost** |
-| Railway → Usage | the daily spend is well under $1/30 days |
+| The app URL loads | the landing page |
+| `/api/notes` | `{"total":0,"items":[]}` on a fresh volume |
+| Upload a PDF → **Short notes** → **Generate** | real notes with page numbers |
+| `/admin` → sign in → **Test connection** | your key's models are listed |
+| **Redeploy** (Railway → Deploy → Redeploy), then reload | **the vault and your PDF are still there** ← the check that matters |
+| Railway → Usage | during the trial, well under $5/30 days |
 
-## 6. Traps
+## 5. Traps
 
 | Symptom | Cause |
 |---|---|
-| Never sleeps, credit drains | an open DB pool (set `DB_POOL_MODE=null`), a healthcheck ping, or something else talking outbound |
-| First request after a break returns 502 | normal for a slept service — reload |
-| Slow request | cold boot, plus Neon waking (a second or two) |
+| Vault empty after a redeploy | no volume attached, or `DATA_DIR` not set — the data was written beside the code |
+| App fails to start after attaching a volume | the volume was mounted at `/app`, shadowing the code — use `/app/data` |
+| Permission errors writing to the volume | a non-root image UID; set `RAILWAY_RUN_UID=0` |
+| A minute of downtime on each redeploy | expected with a volume: Railway refuses to have two deployments mounted at once |
 | `429` from the AI | an OpenRouter `:free` model — use `openai/gpt-oss-20b` |
-| Service stopped mid-month | the $1 credit is spent; it resumes next cycle |
-| Prepared-statement errors from the database | you used Neon's `-pooler` host with asyncpg — use the direct host |
+| Network calls fail on the trial | **Limited Trial** (GitHub account unverified) restricts outbound access — check railway.com/verify |
+| Service stopped mid-month | the credit is spent; it resumes next cycle. On the trial, note that Railway **deletes trial volumes 30 days after the credits expire** — see §6 |
 
-## 7. If you'd rather not live inside $1
+## 6. Backups (worth two minutes)
 
-Railway **Hobby is $5/month** and includes $5 of usage, plus a **5 GB volume** at
-~$0.15/GB/month. With a volume you can drop all of the above: keep SQLite and
-`STORAGE_BACKEND=disk`, turn Serverless off, and the app runs exactly as it does on a VPS —
-no cold starts, no pool tuning. Cheaper than most VPS providers, and there is nothing to
-administer. That is the honest recommendation if the class actually uses it daily.
+Everything is on the volume, so that volume is the app's only copy. Railway supports **manual and
+automated volume backups** (service → the volume → Backups), which keeps durability entirely
+inside Railway. Take a manual backup once the class vault is populated, and keep a copy of any
+export you make off-platform.
 
-## 8. Railway free vs Render free
+## 7. If you would rather use Railway's Postgres
 
-| | Railway Free | Render Free |
-|---|---|---|
-| Credit | $1/month, then workloads stop | n/a — genuinely free |
-| Sleeps after | ~5–10 min **without outbound traffic** | ~15 min without traffic |
-| Cold boot | a few seconds | 30–60 s |
-| Gotcha | outbound traffic (incl. DB pools) keeps it awake | slow cold start |
-| Setup | Serverless + `DB_POOL_MODE=null` | none beyond the env vars |
+Railway's Postgres plugin works too, and the app supports it without changes:
 
-Both run this app. Render is the safer default because it cannot stop your service mid-month;
-Railway wakes faster. The code is identical either way — that is the point of
-`STORAGE_BACKEND` and `DB_POOL_MODE` being settings rather than rewrites.
+```dotenv
+DATABASE_URL=postgresql+asyncpg://...   # anything Railway gives you; the scheme is rewritten
+STORAGE_BACKEND=database                # documents in the database instead of the volume
+DB_POOL_MODE=null                        # lets the service sleep: an idle pool is outbound traffic
+```
+
+Honest trade-off: a Postgres service **runs continuously**, so it also spends credit — on the
+free plan's $1/month that is the difference between free and not. The volume path in §2 is
+cheaper and simpler; this one buys you point-in-time recovery and no size ceiling near 0.5 GB.
+
+## 8. When you outgrow free: Hobby, $5/month
+
+Includes $5 of usage and a **5 GB volume** (resizable live, no downtime). Same project, same
+volume, nothing to migrate — the service just stops sleeping and gets faster. That is the honest
+recommendation once the class uses it daily; the free path is for getting it in front of students
+without spending anything.
+
+## 9. How this was verified
+
+No Docker daemon exists in the environment this was built in, so the image was verified by doing
+exactly what it does, on a clean copy of the repo:
+
+- `pip install -r requirements.txt` into a fresh virtualenv — completed, so `requirements.txt` is
+  complete for the container path;
+- the image's own command, `uvicorn main:app --host 0.0.0.0 --port $PORT`, started the app:
+  `/api/notes` → 200, `/` → 200;
+- the full 23-check HTTP suite passed against that build (**23/23**);
+- with `DATA_DIR` pointing at a directory standing in for the volume, the volume contained
+  `pharmascan.db`, `uploaded_notes/` (20 documents) and `app.log`;
+- the container was then killed and the image layer wiped (what a redeploy does): after restart
+  the vault was intact, the document bytes were **identical**, and `/admin` still answered.

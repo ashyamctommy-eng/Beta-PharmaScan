@@ -323,8 +323,8 @@ container with no state at all: a restart, a redeploy or a cold start changes no
 Verified end to end — after killing the app and deleting every local file, a fresh process
 still served the vault, the identical document bytes and the cached notes.
 
-`render.yaml` in this repo is a ready Blueprint for that setup (database storage + the
-OpenRouter model + the token budgets). Details and the free-tier traps: **DEPLOY-FREE-HOST.md**.
+The environment variables for that mode are in **.env.example**; **RAILWAY-DEPLOY.md** covers a
+free host that keeps its state on a mounted volume instead.
 
 ## 10. Alternative: container hosts (rollout.host, Render, Railway, Fly)
 

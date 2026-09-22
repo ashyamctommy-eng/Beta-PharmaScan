@@ -4,8 +4,12 @@
 # bridge, no Passenger spawn-method traps. uvicorn serves the ASGI app directly,
 # which is what the app was written for.
 #
-# Hosts with an ephemeral filesystem (Render, Railway, Koyeb, rollout.host — free tiers
-# wipe the disk on restart) must not keep state on it. Two settings do that:
+# The container's own filesystem is wiped on every redeploy, so state must not live on it.
+# On Railway: attach a volume at /app/data and set DATA_DIR=/app/data — that one variable
+# puts the SQLite database, the uploaded documents and the log inside the volume together
+# (SQLite + STORAGE_BACKEND=disk, the defaults, then need no other change).
+#
+# Without a volume, point the app at a managed database instead:
 #   DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/pharmascan   (or a plain
 #       postgresql:// URL — core/config.py rewrites the scheme, and ?sslmode=require,
 #       into what asyncpg accepts, so paste whatever the host gives you)

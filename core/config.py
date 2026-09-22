@@ -71,6 +71,11 @@ class Settings(BaseSettings):
 
     # ── Paths ─────────────────────────────────────────────────────────────────
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
+    # Where the app keeps the files it owns (SQLite database, uploaded documents, log).
+    # Set DATA_DIR to a mounted volume on a host that wipes the filesystem on redeploy —
+    # Railway: mount a volume at /app/data and set DATA_DIR=/app/data. Without it, a
+    # redeploy silently returns to an empty vault.
+    DATA_DIR: Path = BASE_DIR
     UPLOAD_DIR: Path = BASE_DIR / "uploaded_notes"
     TEMPLATES_DIR: Path = BASE_DIR / "templates"
     STATIC_DIR: Path = BASE_DIR / "static"
@@ -149,14 +154,35 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 
+def apply_data_dir(cfg: "Settings") -> None:
+    """Point the app's own files at DATA_DIR when it has been moved onto a volume.
+
+    Explicit settings win: if UPLOAD_DIR or DATABASE_URL was given (a managed Postgres,
+    an unusual upload path), it is left exactly as provided. Both are relocated together
+    so a volume can never hold the database while the documents silently stay behind on
+    the ephemeral layer — a split that only shows up as a half-empty vault later.
+    """
+    data_dir = Path(cfg.DATA_DIR)
+    if data_dir.resolve() == Path(cfg.BASE_DIR).resolve():
+        return  # nothing was moved; leave the defaults alone
+    provided = getattr(cfg, "model_fields_set", set())
+    if "UPLOAD_DIR" not in provided:
+        cfg.UPLOAD_DIR = data_dir / "uploaded_notes"
+    if "DATABASE_URL" not in provided:
+        cfg.DATABASE_URL = f"sqlite+aiosqlite:///{data_dir}/pharmascan.db"
+
+
 settings = Settings()
+apply_data_dir(settings)
 
 # Applied here, once, so every consumer (the engine, cpanel_check.py, the admin panel)
-# sees the same working URL rather than each re-deriving it.
+# sees the same working URL rather than each re-deriving it. A host-provided
+# postgresql:// URL is rewritten into what asyncpg can open.
 settings.DATABASE_URL = normalize_database_url(settings.DATABASE_URL)
 
-# Guarantee the upload directory exists at import time — but only for the disk
-# backend. On a stateless host (STORAGE_BACKEND=database) creating it would just be a
+# Guarantee the directories exist at import time — but the upload directory only for the
+# disk backend. On a stateless host (STORAGE_BACKEND=database) creating it would just be a
 # directory that is wiped on every restart.
+settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 if (settings.STORAGE_BACKEND or "disk").strip().lower() in ("disk", "filesystem", "file"):
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@ query, which is the worst possible time to discover it.
 
 import unittest
 
-from core.config import normalize_database_url
+from core.config import Settings, apply_data_dir, normalize_database_url
 from core.database import _pool_class_for
 
 
@@ -66,6 +66,42 @@ class NormalizeDatabaseUrlTests(unittest.TestCase):
             normalize_database_url("postgresql://u:p@host/db?channel_binding=require"),
             "postgresql+asyncpg://u:p@host/db",
         )
+
+
+class DataDirRelocationTests(unittest.TestCase):
+    """A mounted volume has to capture the app's own files, not half of them."""
+
+    def _settings(self, **overrides):
+        # Settings() reads the repo's .env, which is harmless here (extra="ignore");
+        # every case below overrides what it cares about.
+        return Settings(**overrides)
+
+    def test_data_dir_moves_both_the_database_and_the_uploads(self):
+        cfg = self._settings(DATA_DIR="/tmp/railway_volume")
+        apply_data_dir(cfg)
+        self.assertEqual(str(cfg.UPLOAD_DIR), "/tmp/railway_volume/uploaded_notes")
+        self.assertEqual(cfg.DATABASE_URL, "sqlite+aiosqlite:////tmp/railway_volume/pharmascan.db")
+
+    def test_defaults_are_untouched_when_no_volume_is_mounted(self):
+        cfg = self._settings()
+        before_url, before_uploads = cfg.DATABASE_URL, str(cfg.UPLOAD_DIR)
+        apply_data_dir(cfg)
+        self.assertEqual(cfg.DATABASE_URL, before_url)
+        self.assertEqual(str(cfg.UPLOAD_DIR), before_uploads)
+
+    def test_an_explicit_database_url_wins(self):
+        # Someone on a managed Postgres with a volume for documents only.
+        url = "postgresql+asyncpg://u:p@host/db"
+        cfg = self._settings(DATA_DIR="/tmp/railway_volume", DATABASE_URL=url)
+        apply_data_dir(cfg)
+        self.assertEqual(cfg.DATABASE_URL, url)
+        self.assertEqual(str(cfg.UPLOAD_DIR), "/tmp/railway_volume/uploaded_notes")
+
+    def test_an_explicit_upload_dir_wins(self):
+        cfg = self._settings(DATA_DIR="/tmp/railway_volume", UPLOAD_DIR="/mnt/files")
+        apply_data_dir(cfg)
+        self.assertEqual(str(cfg.UPLOAD_DIR), "/mnt/files")
+        self.assertEqual(cfg.DATABASE_URL, "sqlite+aiosqlite:////tmp/railway_volume/pharmascan.db")
 
 
 class PoolModeTests(unittest.TestCase):
