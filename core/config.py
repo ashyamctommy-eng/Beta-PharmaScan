@@ -10,6 +10,54 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 
 
+# Hosts hand you a URL that the async driver cannot open. Railway, Render, Neon and
+# Supabase all export plain `postgresql://` (sometimes `postgres://`), and they append
+# `?sslmode=require`, which is a libpq spelling that asyncpg does not accept. Getting this
+# wrong is an immediate crash on the first database call, so fix the URL instead of asking
+# the reader to remember. Everything else is left exactly as given.
+_ASYNCPG_SCHEME = "postgresql+asyncpg://"
+# libpq-only parameters asyncpg rejects outright if they are passed through.
+_LIBPQ_ONLY_PARAMS = {"channel_binding", "connection_limit", "pgbouncer", "target_session_attrs"}
+# asyncpg accepts the same names for these values, so the values pass through unchanged.
+_SSL_VALUES = {"require", "prefer", "allow", "disable", "verify-ca", "verify-full"}
+
+
+def normalize_database_url(url: str) -> str:
+    """Rewrite a host-provided database URL into one asyncpg can open.
+
+    ``postgres://``/``postgresql://`` → ``postgresql+asyncpg://``, and the libpq
+    spellings ``sslmode=`` / ``channel_binding=`` → what asyncpg expects.
+    Anything already correct, and anything non-Postgres (SQLite), is returned as-is.
+    """
+    if not url:
+        return url
+    url = url.strip()
+    for scheme in ("postgres://", "postgresql://"):
+        if url.startswith(scheme):
+            url = _ASYNCPG_SCHEME + url[len(scheme):]
+            break
+    if not url.startswith(_ASYNCPG_SCHEME):
+        return url
+
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    kept = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        key, _, value = pair.partition("=")
+        lowered = key.strip().lower()
+        if lowered in _LIBPQ_ONLY_PARAMS:
+            continue
+        if lowered == "sslmode":
+            key, lowered = "ssl", "ssl"
+            if value.lower() in _SSL_VALUES:
+                value = value.lower()
+        kept.append(f"{key}={value}")
+    return base + "?" + "&".join(kept) if kept else base
+
+
 class Settings(BaseSettings):
     # ── Application ───────────────────────────────────────────────────────────
     APP_TITLE: str = "PharmaScanKE"
@@ -29,6 +77,14 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = f"sqlite+aiosqlite:///{Path(__file__).resolve().parent.parent}/pharmascan.db"
+
+    # ── Connection pooling ────────────────────────────────────────────────────
+    # "default" keeps a pool of open connections — right for an always-on host.
+    # "null" opens a connection per request and closes it again. That matters on a host
+    # that puts an idle service to sleep: Railway decides a service is idle from its
+    # OUTBOUND traffic, so a pool holding database connections open keeps it awake and
+    # spends the free credit. Cost of "null" is a few tens of ms per request.
+    DB_POOL_MODE: str = "default"
 
     # ── Document storage ──────────────────────────────────────────────────────
     # "disk" (default) keeps uploads in uploaded_notes/ — right for a real filesystem
@@ -94,6 +150,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Applied here, once, so every consumer (the engine, cpanel_check.py, the admin panel)
+# sees the same working URL rather than each re-deriving it.
+settings.DATABASE_URL = normalize_database_url(settings.DATABASE_URL)
 
 # Guarantee the upload directory exists at import time — but only for the disk
 # backend. On a stateless host (STORAGE_BACKEND=database) creating it would just be a

@@ -4,11 +4,14 @@
 # bridge, no Passenger spawn-method traps. uvicorn serves the ASGI app directly,
 # which is what the app was written for.
 #
-# IMPORTANT on hosts with an ephemeral filesystem (rollout.host's free tier sleeps
-# after 15 minutes and restarts servers): SQLite and uploaded_notes/ live on that
-# filesystem and will be lost. Point DATABASE_URL at a managed Postgres, e.g.
-#   DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/pharmascan
-# Uploaded files still need object storage; until then, treat uploads as temporary.
+# Hosts with an ephemeral filesystem (Render, Railway, Koyeb, rollout.host — free tiers
+# wipe the disk on restart) must not keep state on it. Two settings do that:
+#   DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/pharmascan   (or a plain
+#       postgresql:// URL — core/config.py rewrites the scheme, and ?sslmode=require,
+#       into what asyncpg accepts, so paste whatever the host gives you)
+#   STORAGE_BACKEND=database    → uploaded documents live in that database too
+# Add DB_POOL_MODE=null on a host that sleeps idle services (Railway Serverless: it
+# decides idleness from OUTBOUND traffic, so an idle connection pool keeps it awake).
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

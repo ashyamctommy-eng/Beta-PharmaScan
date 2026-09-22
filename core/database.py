@@ -12,13 +12,29 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from core.config import settings
 
 
 _IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 
+def _pool_class_for(pool_mode: str):
+    """``NullPool`` (one connection per request) when the host sleeps idle services.
+
+    None means SQLAlchemy's default pool. See DB_POOL_MODE in core/config.py: Railway's
+    Serverless decides a service is idle from its outbound traffic, so an idle pool keeps
+    the container awake and spends the free credit.
+    """
+    if (pool_mode or "").strip().lower() in ("null", "none", "no-pool", "nopool"):
+        return NullPool
+    return None
+
+
 _engine_kwargs: dict = {"echo": settings.DEBUG}
+_pool_class = _pool_class_for(settings.DB_POOL_MODE)
+if _pool_class is not None:
+    _engine_kwargs["poolclass"] = _pool_class
 if _IS_SQLITE:
     # SQLite-only: passing this to asyncpg is a TypeError. Keeping it conditional is
     # what lets the same code run on Postgres, which a container host with an
