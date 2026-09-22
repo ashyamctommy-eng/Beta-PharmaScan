@@ -1463,6 +1463,7 @@
     const done  = state.sections_done || 0;
     const pct   = total ? Math.round((done / total) * 100) : (state.status === 'running' ? 5 : 0);
     const stalled = state.status === 'rate_limited' || state.status === 'budget_exhausted';
+    const budgetStop = state.status === 'budget_exhausted';
     const sections = state.sections || [];
     $('summary-body').innerHTML = `
       <div>
@@ -1482,7 +1483,9 @@
           <span class="page-chip">${s.status === 'done' ? 'done' : esc(s.status)}</span>
         </div>`).join('')}</div>` : ''}`;
     $('summary-footer').innerHTML = stalled
-      ? `<span class="text-xs text-slate-400">Progress is saved — nothing is lost.</span>
+      ? `<span class="text-xs text-slate-400">${budgetStop
+           ? 'Progress is saved — the token allowance is a rolling 24-hour window, so it frees up gradually.'
+           : 'Progress is saved — nothing is lost.'}</span>
          <span class="flex items-center gap-3">
            <button id="summary-cancel" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">Close</button>
            <button id="summary-continue" class="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-lg transition shadow-sm">Continue</button>

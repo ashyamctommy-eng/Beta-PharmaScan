@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.access import ADMIN_ALLOWANCE_NOTE
 from core.storage import StorageError, get_storage
 from core.ai import (
     CallOutcome,
@@ -226,27 +227,51 @@ async def record_usage(db: AsyncSession, *, kind: str, model: str, input_tokens:
     await db.commit()
 
 
-async def budget_room(db: AsyncSession, client: str) -> tuple[int, str]:
+async def budget_room(db: AsyncSession, client: str, *, admin: bool = False) -> tuple[int, str]:
     """Return (tokens still available to this caller, reason-if-exhausted).
 
     The answer is the smaller of the app-wide and per-client rooms, so a mid-section
-    guard against overspending is meaningful in both cases.
+    guard against overspending is meaningful in both cases. `admin=True` means the
+    request carried a valid signed admin session (see core.access.guard): the
+    per-device allowance is skipped for it, but the app-wide budget is never
+    skipped — it is the ceiling that protects the API key.
     """
     global_used = await tokens_used_today(db)
     global_room = settings.SUMMARISE_DAILY_TOKEN_BUDGET - global_used
     if global_room <= 0:
-        return 0, (f"Today's summary budget is used up ({global_used:,} of "
-                   f"{settings.SUMMARISE_DAILY_TOKEN_BUDGET:,} tokens). "
-                   "Finished sections are saved — press Continue tomorrow, or raise "
-                   "SUMMARISE_DAILY_TOKEN_BUDGET.")
-    if not client:
+        return 0, app_budget_message(global_used)
+    if admin or not client:
         return global_room, ""
     client_used = await tokens_used_today(db, client)
     client_room = settings.SUMMARISE_PER_IP_DAILY_TOKENS - client_used
     if client_room <= 0:
-        return 0, (f"This device has used its daily share ({client_used:,} of "
-                   f"{settings.SUMMARISE_PER_IP_DAILY_TOKENS:,} tokens). Try again tomorrow.")
+        return 0, device_budget_message(client_used)
     return min(global_room, client_room), ""
+
+
+def app_budget_message(used: int) -> str:
+    """The app-wide refusal, told honestly: rolling 24h, real numbers, no 'tomorrow'.
+
+    Both budgets are rolling windows over the UsageEvent ledger, so the allowance
+    does not reset at midnight — it frees up as the oldest calls age out.
+    """
+    return (
+        f"The app-wide daily budget is used up: {used:,} of "
+        f"{settings.SUMMARISE_DAILY_TOKEN_BUDGET:,} tokens used in the last 24 hours "
+        "(0 left). It is a rolling 24-hour window, so it frees up gradually rather "
+        "than at midnight — finished sections are saved, so press Continue later."
+    )
+
+
+def device_budget_message(used: int) -> str:
+    """The per-device refusal — names *this* budget, so it is not confused with the
+    app-wide one the admin raises."""
+    return (
+        f"This device's daily allowance is used up: {used:,} of "
+        f"{settings.SUMMARISE_PER_IP_DAILY_TOKENS:,} tokens used in the last 24 hours "
+        "(0 left). It is a rolling 24-hour window, so it frees up gradually rather "
+        "than at midnight — press Continue later to use what has freed up."
+    )
 
 
 # ── The pipeline ──────────────────────────────────────────────────────────────
@@ -266,11 +291,14 @@ class TickResult:
 
 async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *,
                    client_id: str = "", caller: Optional[Caller] = None,
-                   max_calls: Optional[int] = None) -> TickResult:
+                   max_calls: Optional[int] = None, admin: bool = False) -> TickResult:
     """Do a bounded amount of work (a few model calls) and return the new state.
 
     Bounded on purpose: on shared hosting a request must not hold a worker for
     minutes, so the UI calls this repeatedly and shows progress between ticks.
+
+    `admin` must be True only for a valid signed admin session (core.access.guard);
+    it skips the per-device allowance, never the app-wide budget.
     """
     caller = caller or make_caller(settings.GROQ_API_KEY, settings.GROQ_BASE_URL)
     budget_calls = max_calls or settings.SUMMARISE_CALLS_PER_REQUEST
@@ -286,6 +314,12 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
     map_model = settings.GROQ_MAP_MODEL or settings.GROQ_MODEL
     reduce_model = settings.GROQ_SUMMARY_MODEL or settings.GROQ_MODEL
     warnings: list[str] = []
+    # Say in the response that the per-device allowance did not apply. It goes in the
+    # warnings (present for every status) and, when the tick has nothing else to say,
+    # in the message the UI renders next to Continue.
+    admin_note = ADMIN_ALLOWANCE_NOTE if (admin and client_id) else ""
+    if admin_note:
+        warnings.append(admin_note)
 
     async def finish(status: str, message: str = "", notes: Optional[dict] = None) -> TickResult:
         summary.status = status
@@ -299,10 +333,10 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             sections_done=summary.sections_done, sections_total=total,
             tokens_spent=summary.tokens_spent, sections_failed=summary.sections_failed,
             notes=notes or (_load_notes(summary) if status == "done" else None),
-            message=message, warnings=warnings,
+            message=message or admin_note, warnings=warnings,
         )
 
-    remaining, blocked = await budget_room(db, client_id)
+    remaining, blocked = await budget_room(db, client_id, admin=admin)
     if blocked:
         return await finish("budget_exhausted", blocked)
 
@@ -362,7 +396,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             )).scalars().first()
             if pending is None:
                 break
-            remaining, blocked = await budget_room(db, client_id)
+            remaining, blocked = await budget_room(db, client_id, admin=admin)
             if blocked:
                 return await finish("budget_exhausted", blocked)
 
@@ -411,7 +445,7 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             )).scalars().all())
             if not claimed:
                 break
-            remaining, blocked = await budget_room(db, client_id)
+            remaining, blocked = await budget_room(db, client_id, admin=admin)
             if blocked:
                 return await finish("budget_exhausted", blocked)
 
@@ -542,7 +576,13 @@ async def _expand_section(db: AsyncSession, caller: Caller, summary: Summary, cl
         if index <= done_chunks:
             continue                                   # already paid for, and saved
         if remaining is not None and spent >= remaining:
-            raise RateLimited("Daily token budget reached mid-section; progress is saved.")
+            # `remaining` is the smaller of the two rooms, so which budget ran out is
+            # not knowable here — name the window, not the budget, rather than guess.
+            raise RateLimited(
+                "The run's token budget ran out mid-section (the app-wide daily budget and "
+                "this device's allowance are rolling 24-hour windows, so they free up "
+                "gradually, not at midnight); progress is saved — press Continue later."
+            )
         pages_line = f"Pages: p.{section.page}-{section.end_page}\n" if section.page else ""
         header = (f"Section: {section.heading}\n{pages_line}"
                   f"Part {index} of {len(chunks)}\n\n--- BEGIN SECTION TEXT ---\n")

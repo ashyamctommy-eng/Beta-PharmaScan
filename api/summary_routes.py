@@ -116,7 +116,7 @@ async def summarise_status(resource_id: int, db: AsyncSession = Depends(get_db))
 @router.post("/summarise/{resource_id}", summary="Generate or continue a summary (bounded work per call)")
 async def summarise_run(resource_id: int, request: Request, body: SummariseRequest | None = None,
                         db: AsyncSession = Depends(get_db)) -> dict:
-    await guard_ai(request, db, feature="summarise")
+    access = await guard_ai(request, db, feature="summarise")
     _guard_enabled()
     resource = await _load_resource(db, resource_id)
     depth = (body.depth if body else "standard")
@@ -147,7 +147,8 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
                 "message": "Already summarised — this document is cached.", "warnings": []}
 
     try:
-        result = await run_tick(db, summary, extraction, client_id=client_identifier(request))
+        result = await run_tick(db, summary, extraction, client_id=client_identifier(request),
+                                admin=access["admin"])
     except ExtractionError as exc:                      # pragma: no cover - defensive
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - never leak a traceback to the browser

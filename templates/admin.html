@@ -223,6 +223,12 @@ touch tmp/restart.txt</pre>
 
   let labels = {}, secretText = {}, models = [];
 
+  /* The one place the exemption is worth repeating: right under the per-device
+     allowance, since that is the limit an admin session is not held to. */
+  const ADMIN_EXEMPTION_NOTE = `<p class="text-xs text-slate-400 -mt-2">A signed-in admin
+    session (this panel) is exempt from the per-device token allowance, but never from the
+    app-wide daily budget.</p>`;
+
   async function loadSettings() {
     const data = await api('/api/admin/settings');
     labels = data.labels || {};
@@ -231,7 +237,8 @@ touch tmp/restart.txt</pre>
     const keys = Object.keys(labels);
     $('settings-form').innerHTML =
       `<datalist id="model-list">${models.map(m => `<option value="${esc(m)}"></option>`).join('')}</datalist>` +
-      keys.map(key => fieldFor(key, data.values[key], data.sources[key], SECRET_KEYS.indexOf(key) >= 0)).join('') +
+      keys.map(key => fieldFor(key, data.values[key], data.sources[key], SECRET_KEYS.indexOf(key) >= 0)
+        + (key === 'SUMMARISE_PER_IP_DAILY_TOKENS' ? ADMIN_EXEMPTION_NOTE : '')).join('') +
       `<p class="text-xs text-slate-400">Available models: ${models.length ? esc(models.join(', ')) : 'could not be listed — test the connection'}</p>`;
     $('settings-form').querySelectorAll('[data-revert]').forEach(button => {
       button.addEventListener('click', async () => {

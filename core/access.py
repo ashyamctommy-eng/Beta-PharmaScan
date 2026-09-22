@@ -12,7 +12,8 @@ Two separate questions, deliberately answered in one place:
      deployment changes underneath them.
 
 Token budgets (core/summarise.py) remain the backstop: an open endpoint still
-cannot drain the Groq quota past `SUMMARISE_DAILY_TOKEN_BUDGET`.
+cannot drain the Groq quota past `SUMMARISE_DAILY_TOKEN_BUDGET`. An admin session is
+exempt from the *per-device* allowance only — the app-wide budget still bounds it.
 """
 
 from __future__ import annotations
@@ -23,9 +24,22 @@ from core.auth import has_access, read_session
 from core.config import settings
 from core.settings_store import apply_overrides
 
+# Returned by guard() for an admin session and repeated in the budget state, so the
+# panel/the browser says *why* the per-device refusal did not appear.
+ADMIN_ALLOWANCE_NOTE = (
+    "Signed in as admin: the per-device token allowance is skipped for this session — "
+    "the app-wide daily budget still applies."
+)
 
-async def guard(request, db, *, feature: str) -> None:
-    """Raise 503/401 unless this caller may use `feature` ('analyze' | 'summarise')."""
+
+async def guard(request, db, *, feature: str) -> dict:
+    """Raise 503/401 unless this caller may use `feature` ('analyze' | 'summarise').
+
+    Returns the caller's access state so the token-budget layer can tell an admin
+    session apart: `{"admin": True, ...}` skips the per-device allowance in
+    core.summarise (the app-wide budget is still the hard ceiling); `admin` is False
+    for everyone else, whose JSON responses are unchanged.
+    """
     await apply_overrides(db)
 
     if feature == "analyze" and not settings.ANALYZE_ENABLED:
@@ -36,11 +50,15 @@ async def guard(request, db, *, feature: str) -> None:
                             "Short notes are switched off by the administrator.")
 
     if read_session(request) is not None:      # the admin is always allowed
-        return
+        # read_session() is the same validation /admin endpoints use (require_admin):
+        # HMAC signature over the cookie body, plus expiry. A forged, unsigned or
+        # expired cookie returns None and falls through to the checks below, so it
+        # cannot claim this exemption.
+        return {"admin": True, "message": ADMIN_ALLOWANCE_NOTE}
     if not (settings.ACCESS_CODE or "").strip():
-        return                                  # no code configured: open, as before
+        return {"admin": False, "message": ""}   # no code configured: open, as before
     if has_access(request):
-        return
+        return {"admin": False, "message": ""}
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED,
         detail={"code_required": True,

@@ -292,13 +292,14 @@ async def download_note(note_id: int, db: AsyncSession = Depends(get_db)):
 async def analyze_content(body: AnalysisRequest, request: Request,
                           db: AsyncSession = Depends(get_db)) -> AnalysisResponse:
     # Kill switch + optional access code, resolved from the panel first.
-    await guard_ai(request, db, feature="analyze")
+    access = await guard_ai(request, db, feature="analyze")
 
     # Document analysis spends the same quota as the summaries, so it is held to the
     # same budget and written to the same ledger — otherwise the panel's usage
-    # numbers would be a lie and this endpoint an unlimited tap on the key.
+    # numbers would be a lie and this endpoint an unlimited tap on the key. An admin
+    # session skips only the per-device allowance (`admin`), never the app-wide budget.
     caller = client_identifier(request)
-    _remaining, blocked = await budget_room(db, caller)
+    _remaining, blocked = await budget_room(db, caller, admin=access["admin"])
     if blocked:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, blocked)
 

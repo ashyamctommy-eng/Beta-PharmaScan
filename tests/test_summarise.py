@@ -22,8 +22,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
+from core import auth  # noqa: E402
 from core import summarise as S  # noqa: E402
+from core.access import ADMIN_ALLOWANCE_NOTE, guard as guard_ai  # noqa: E402
 from core.database import Base  # noqa: E402
 from core.extract import Extraction, Section, estimate_tokens  # noqa: E402
 from models import resource as _resource  # noqa: F401,E402  (registers tables)
@@ -113,6 +116,19 @@ def fake_extraction(sections: int = 4, tokens_each: int = 300) -> Extraction:
     text = "\n".join(p.text for p in parts)
     return Extraction(kind="pdf", pages=sections, sections=parts, text=text,
                       tokens=estimate_tokens(text), chars_per_page=1500)
+
+
+def request_with_admin_cookie(token: str | None) -> Request:
+    """A bare ASGI request carrying (or not) the `ps_admin` cookie — enough for
+    core.access.guard() and core.access.client_identifier(), with no HTTP layer."""
+    headers = []
+    if token is not None:
+        headers.append((b"cookie", f"{auth.ADMIN_COOKIE}={token}".encode("ascii")))
+    return Request({
+        "type": "http", "method": "POST", "path": "/api/summarise/1", "headers": headers,
+        "query_string": b"", "scheme": "http",
+        "client": ("10.0.0.9", 4321), "server": ("testserver", 80),
+    })
 
 
 class PipelineCase(unittest.TestCase):
@@ -308,7 +324,13 @@ class TestQuotaAndFailures(PipelineCase):
 
         result = asyncio.run(run())
         self.assertEqual(result.status, "budget_exhausted")
-        self.assertIn("daily share", result.message)
+        # The refusal must name this device's allowance (not the app-wide budget) and
+        # explain the rolling window instead of promising a midnight reset.
+        self.assertIn("device's daily allowance", result.message)
+        self.assertIn("50,000", result.message)
+        self.assertIn("100", result.message)
+        self.assertIn("rolling 24-hour window", result.message)
+        self.assertNotIn("tomorrow", result.message.lower())
 
     def test_rate_limit_parks_the_job_with_a_clear_message(self) -> None:
         extraction = fake_extraction(sections=3)
@@ -836,6 +858,144 @@ class TestParallelSectionExpansion(PipelineCase):
         self.assertEqual(sum(1 for c in caller.calls if c["kind"] == "section"), 3)
         self.assertEqual(result.sections_done, 3)
         self.assertEqual(result.sections_failed, 0)
+
+
+class TestAdminBudgetExemption(PipelineCase):
+    """A signed-in admin skips the per-device allowance, never the app-wide budget —
+    and the refusals say which budget ran out and what a rolling window means."""
+
+    AUTH_KEYS = ("ADMIN_PASSWORD", "ADMIN_PASSWORD_HASH", "SESSION_SECRET",
+                 "ACCESS_CODE", "SUMMARISE_ENABLED")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._auth_saved = {key: getattr(S.settings, key) for key in self.AUTH_KEYS}
+        # A known password, so create_session() can sign a real cookie for the test.
+        S.settings.ADMIN_PASSWORD = "a-long-enough-admin-password"
+        S.settings.ADMIN_PASSWORD_HASH = ""
+        S.settings.SESSION_SECRET = ""
+        auth._derived_cache.clear()
+
+    def tearDown(self) -> None:
+        for key, value in self._auth_saved.items():
+            setattr(S.settings, key, value)
+        auth._derived_cache.clear()
+        super().tearDown()
+
+    async def _seed_usage(self, tokens: int, client: str = "") -> None:
+        async with self.Session() as db:
+            db.add(UsageEvent(kind="section", model="m", total_tokens=tokens, client=client))
+            await db.commit()
+
+    def test_admin_session_is_allowed_with_the_device_allowance_exhausted(self) -> None:
+        extraction = fake_extraction(sections=2)
+        summary = asyncio.run(self._new_summary(depth="brief"))
+        asyncio.run(self._seed_usage(50_000, "noisy-client"))
+        token, _session = auth.create_session()
+
+        async def scenario() -> tuple[dict, S.TickResult]:
+            async with self.Session() as db:
+                access = await guard_ai(request_with_admin_cookie(token), db, feature="summarise")
+                # Set the budget *after* guard(): apply_overrides() rewrites every
+                # editable setting from its startup snapshot on each call.
+                S.settings.SUMMARISE_PER_IP_DAILY_TOKENS = 100
+                fresh = await db.get(Summary, summary.id)
+                result = await S.run_tick(db, fresh, extraction, client_id="noisy-client",
+                                          caller=StubCaller(), max_calls=5, admin=access["admin"])
+                return access, result
+
+        access, result = asyncio.run(scenario())
+        self.assertTrue(access["admin"], "a valid signed session must be recognised")
+        self.assertEqual(result.status, "done", result.message)
+        self.assertIn(ADMIN_ALLOWANCE_NOTE, result.warnings, "the response must note the skip")
+        self.assertIn(ADMIN_ALLOWANCE_NOTE, result.message)
+
+    def test_only_a_valid_signed_session_bypasses_the_device_allowance(self) -> None:
+        extraction = fake_extraction(sections=2)
+        summary = asyncio.run(self._new_summary(depth="brief"))
+        asyncio.run(self._seed_usage(37_863, "noisy-client"))
+        # Correctly signed, but expired: valid signature is not enough.
+        expired = auth.sign_payload({"sub": "admin", "iat": 0, "exp": int(time.time()) - 60,
+                                     "csrf": "x", "jti": "x"}, "session")
+
+        async def scenario() -> tuple[dict, dict, dict, S.TickResult]:
+            async with self.Session() as db:
+                forged = await guard_ai(request_with_admin_cookie("forged.token"),
+                                        db, feature="summarise")
+                stale = await guard_ai(request_with_admin_cookie(expired), db, feature="summarise")
+                absent = await guard_ai(request_with_admin_cookie(None), db, feature="summarise")
+                S.settings.SUMMARISE_PER_IP_DAILY_TOKENS = 30_000
+                fresh = await db.get(Summary, summary.id)
+                result = await S.run_tick(db, fresh, extraction, client_id="noisy-client",
+                                          caller=StubCaller(), max_calls=5,
+                                          admin=absent["admin"])
+                return forged, stale, absent, result
+
+        forged, stale, absent, result = asyncio.run(scenario())
+        self.assertFalse(forged["admin"], "an unsigned cookie must not bypass anything")
+        self.assertFalse(stale["admin"], "an expired signed session must not bypass anything")
+        self.assertFalse(absent["admin"])
+        self.assertEqual(result.status, "budget_exhausted")
+        self.assertIn("device", result.message.lower())
+        self.assertIn("37,863", result.message)
+        self.assertIn("30,000", result.message)
+        self.assertIn("0 left", result.message)
+        self.assertIn("rolling 24-hour window", result.message)
+        self.assertNotIn("tomorrow", result.message.lower())
+
+    def test_app_wide_budget_still_bounds_an_admin_session(self) -> None:
+        extraction = fake_extraction(sections=2)
+        summary = asyncio.run(self._new_summary(depth="brief"))
+        asyncio.run(self._seed_usage(200_000))          # app-wide (no client key)
+        token, _session = auth.create_session()
+        caller = StubCaller()
+
+        async def scenario() -> tuple[dict, S.TickResult]:
+            async with self.Session() as db:
+                access = await guard_ai(request_with_admin_cookie(token), db, feature="summarise")
+                S.settings.SUMMARISE_DAILY_TOKEN_BUDGET = 150_000
+                S.settings.SUMMARISE_PER_IP_DAILY_TOKENS = 30_000
+                fresh = await db.get(Summary, summary.id)
+                result = await S.run_tick(db, fresh, extraction, client_id="noisy-client",
+                                          caller=caller, max_calls=5, admin=access["admin"])
+                return access, result
+
+        access, result = asyncio.run(scenario())
+        self.assertTrue(access["admin"])
+        self.assertEqual(result.status, "budget_exhausted",
+                         "the app-wide budget is the ceiling, admins included")
+        self.assertIn("app-wide daily budget", result.message)
+        self.assertIn("200,000", result.message)
+        self.assertIn("150,000", result.message)
+        self.assertEqual(caller.calls, [], "the ceiling must stop the run before any model call")
+
+    def test_budget_messages_name_the_budget_and_the_rolling_window(self) -> None:
+        S.settings.SUMMARISE_DAILY_TOKEN_BUDGET = 150_000
+        S.settings.SUMMARISE_PER_IP_DAILY_TOKENS = 30_000
+
+        async def room() -> tuple[int, str]:
+            async with self.Session() as db:
+                return await S.budget_room(db, "noisy-client")
+
+        asyncio.run(self._seed_usage(31_500, "noisy-client"))
+        remaining, message = asyncio.run(room())
+        self.assertEqual(remaining, 0)
+        self.assertIn("device", message.lower(), "the per-device refusal must name *this* budget")
+        self.assertIn("31,500", message)
+        self.assertIn("30,000", message)
+        self.assertIn("0 left", message)
+        self.assertIn("rolling 24-hour window", message)
+        self.assertNotIn("app-wide", message)
+        self.assertNotIn("tomorrow", message.lower())
+
+        asyncio.run(self._seed_usage(160_000))          # the app-wide budget now goes too
+        remaining, message = asyncio.run(room())
+        self.assertEqual(remaining, 0)
+        self.assertIn("app-wide daily budget", message)
+        self.assertIn("191,500", message)
+        self.assertIn("150,000", message)
+        self.assertIn("rolling 24-hour window", message)
+        self.assertNotIn("tomorrow", message.lower())
 
 
 if __name__ == "__main__":
