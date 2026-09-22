@@ -8,6 +8,7 @@ Railway:      Procfile → uvicorn main:app --host 0.0.0.0 --port $PORT
 """
 
 import logging
+import logging.handlers
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -89,12 +90,16 @@ app.add_middleware(
 )
 
 # ── Static mounts ─────────────────────────────────────────────────────────────
-settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# The upload directory is only meaningful for the disk backend; on a stateless host
+# STORAGE_BACKEND=database and creating it would just be clutter that a restart wipes.
+# The mount stays for legacy rows written to disk before a switch, hence check_dir=False.
+if (settings.STORAGE_BACKEND or "disk").strip().lower() in ("disk", "filesystem", "file"):
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 settings.STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount(
     "/uploaded_notes",
-    StaticFiles(directory=str(settings.UPLOAD_DIR)),
+    StaticFiles(directory=str(settings.UPLOAD_DIR), check_dir=False),
     name="uploaded_notes",
 )
 app.mount(

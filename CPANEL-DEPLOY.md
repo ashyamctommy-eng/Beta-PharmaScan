@@ -307,7 +307,26 @@ Notes that matter in practice:
   not exist on OpenRouter; the equivalent there is `meta-llama/llama-3.3-70b-instruct`.
 - The token budgets in the panel apply to whichever provider is configured.
 
-## 9. Alternative: container hosts (rollout.host, Render, Railway, Fly)
+## 9. Free hosts with an ephemeral filesystem (`STORAGE_BACKEND=database`)
+
+Free container hosts (Render, Koyeb, rollout.host) wipe the filesystem on every restart,
+so neither the database file nor `uploaded_notes/` survives. Setting
+
+```dotenv
+STORAGE_BACKEND=database
+DATABASE_URL=postgresql+asyncpg://...        # e.g. a Neon free database
+MAX_UPLOAD_SIZE_MB=25                        # free DB tiers are ~0.5 GB
+```
+
+puts **documents, summaries and the token ledger all in the database**, which leaves the
+container with no state at all: a restart, a redeploy or a cold start changes nothing.
+Verified end to end — after killing the app and deleting every local file, a fresh process
+still served the vault, the identical document bytes and the cached notes.
+
+`render.yaml` in this repo is a ready Blueprint for that setup (database storage + the
+OpenRouter model + the token budgets). Details and the free-tier traps: **DEPLOY-FREE-HOST.md**.
+
+## 10. Alternative: container hosts (rollout.host, Render, Railway, Fly)
 
 The `Dockerfile` in this repo runs the app the way it was written — `uvicorn main:app`, no
 Passenger, no `passenger_wsgi.py`, no WSGI bridge, no fork/spawn traps. If a host builds a

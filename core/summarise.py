@@ -17,11 +17,12 @@ instead of paying again. Results are cached by file hash forever.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import logging
 import re
+import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.storage import StorageError, get_storage
 from core.ai import (
     CallOutcome,
     Caller,
@@ -752,34 +754,67 @@ def _load_notes(summary: Summary) -> Optional[dict]:
 
 
 # ── Public helpers used by the API layer ──────────────────────────────────────
-def source_path(resource: Resource) -> Path:
-    """Where the uploaded file actually lives on disk."""
-    return Path(settings.UPLOAD_DIR) / resource.file_name
+_CACHE: "OrderedDict[str, tuple[Extraction, str]]" = OrderedDict()
+_CACHE_MAX = 8
 
 
-@functools.lru_cache(maxsize=8)
-def _load_source(path_str: str, mtime_ns: int, size: int) -> tuple[Extraction, str]:
-    """Parse *and* hash a document once per (path, mtime, size).
+def _remember(key: str, value: tuple[Extraction, str]) -> None:
+    _CACHE[key] = value
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > _CACHE_MAX:
+        _CACHE.popitem(last=False)
 
-    Without this, every preview and every tick re-parses and re-hashes the whole
-    upload: the preview endpoint is free and needs no key, and a run fires many
-    ticks, so a 50 MB PDF becomes a cheap way to keep a shared worker busy. The
-    cache key includes mtime and size, so replacing the file invalidates it.
+
+def reset_extraction_cache() -> None:
+    """Forget cached parses (tests, and anything that swaps storage backends)."""
+    _CACHE.clear()
+
+
+async def source_identity(db: AsyncSession, resource: Resource) -> tuple[Extraction, str]:
+    """Parse *and* hash a document once per (backend, resource, fingerprint).
+
+    Without the cache, every preview and every tick re-parses and re-hashes the whole
+    upload: the preview endpoint is free and needs no key, and a run fires many ticks,
+    so a 50 MB PDF becomes a cheap way to keep a shared worker busy. The fingerprint
+    (mtime+size on disk, sha256 in the database) makes the cache self-invalidating.
+
+    Extraction always happens against a **file path**: on disk that is the upload
+    itself, and for the database backend the bytes are materialised to a temporary
+    file, so there is exactly one extraction code path to trust.
     """
-    path = Path(path_str)
-    return extract_document(path), file_sha256(path)
+    storage = get_storage()
+    try:
+        fingerprint = await storage.fingerprint(db, resource)
+    except StorageError as exc:
+        raise ExtractionError(str(exc)) from exc
+
+    key = f"{storage.name}:{resource.id}:{fingerprint}"
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    local = await storage.local_path(db, resource)
+    if local is not None:
+        extraction = extract_document(local)
+        digest = file_sha256(local)
+    else:
+        try:
+            data = await storage.load_bytes(db, resource)
+        except StorageError as exc:
+            raise ExtractionError(str(exc)) from exc
+        suffix = Path(resource.file_name).suffix
+        with tempfile.NamedTemporaryFile(prefix="pharmascan-", suffix=suffix, delete=True) as handle:
+            handle.write(data)
+            handle.flush()
+            extraction = extract_document(Path(handle.name))
+        digest = hashlib.sha256(data).hexdigest()
+
+    _remember(key, (extraction, digest))
+    return extraction, digest
 
 
-def source_identity(resource: Resource) -> tuple[Extraction, str]:
-    path = source_path(resource)
-    if not path.exists():
-        raise ExtractionError(f"The uploaded file for '{resource.title}' is no longer on disk.")
-    stat = path.stat()
-    return _load_source(str(path), stat.st_mtime_ns, stat.st_size)
-
-
-def extract_resource(resource: Resource) -> Extraction:
-    return source_identity(resource)[0]
+async def extract_resource(db: AsyncSession, resource: Resource) -> Extraction:
+    return (await source_identity(db, resource))[0]
 
 
 async def get_summary(db: AsyncSession, resource: Resource) -> Optional[Summary]:
@@ -791,7 +826,7 @@ async def get_summary(db: AsyncSession, resource: Resource) -> Optional[Summary]
     for a document that was already summarised.
     """
     try:
-        digest = source_identity(resource)[1]
+        digest = (await source_identity(db, resource))[1]
     except ExtractionError:
         digest = ""
     if digest:
@@ -805,7 +840,7 @@ async def get_summary(db: AsyncSession, resource: Resource) -> Optional[Summary]
 
 
 async def get_or_create_summary(db: AsyncSession, resource: Resource, *, depth: str) -> Summary:
-    digest = source_identity(resource)[1]
+    digest = (await source_identity(db, resource))[1]
     summary = (await db.execute(select(Summary).where(Summary.file_hash == digest))).scalars().first()
     if summary is None:
         summary = Summary(resource_id=resource.id, file_hash=digest, file_name=resource.file_name,

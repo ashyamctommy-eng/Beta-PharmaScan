@@ -69,7 +69,7 @@ async def summarise_preview(resource_id: int, depth: str = "standard",
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"Invalid depth '{depth}'. Choose from: {', '.join(DEPTHS)}.")
     try:
-        extraction = extract_resource(resource)
+        extraction = await extract_resource(db, resource)
     except ExtractionError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
@@ -126,7 +126,7 @@ async def summarise_run(resource_id: int, request: Request, body: SummariseReque
                             "GROQ_API_KEY is not set on the server, so no summary can be generated.")
 
     try:
-        extraction = extract_resource(resource)
+        extraction = await extract_resource(db, resource)
     except ExtractionError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     if extraction.scanned:

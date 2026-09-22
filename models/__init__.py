@@ -3,5 +3,6 @@ so `Base.metadata.create_all` in core.database.init_db sees the full schema."""
 from .resource import Resource
 from .setting import AppSetting
 from .summary import Summary, SummarySection, UsageEvent
+from .upload import UploadedFile
 
-__all__ = ["Resource", "AppSetting", "Summary", "SummarySection", "UsageEvent"]
+__all__ = ["Resource", "AppSetting", "Summary", "SummarySection", "UsageEvent", "UploadedFile"]

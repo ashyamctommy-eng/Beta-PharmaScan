@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = f"sqlite+aiosqlite:///{Path(__file__).resolve().parent.parent}/pharmascan.db"
 
+    # ── Document storage ──────────────────────────────────────────────────────
+    # "disk" (default) keeps uploads in uploaded_notes/ — right for a real filesystem
+    # (cPanel, VPS, PythonAnywhere). "database" keeps the bytes in the DB, which is what
+    # makes the app stateless for hosts whose filesystem is wiped on restart
+    # (Render/Koyeb/rollout free tiers) and for Railway without a volume.
+    STORAGE_BACKEND: str = "disk"
+
     # ── Upload Constraints ────────────────────────────────────────────────────
     ALLOWED_EXTENSIONS: set = {".pdf", ".docx", ".doc", ".pptx", ".ppt"}
     MAX_UPLOAD_SIZE_MB: int = 50
@@ -88,5 +95,8 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Guarantee the upload directory exists at import time
-settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# Guarantee the upload directory exists at import time — but only for the disk
+# backend. On a stateless host (STORAGE_BACKEND=database) creating it would just be a
+# directory that is wiped on every restart.
+if (settings.STORAGE_BACKEND or "disk").strip().lower() in ("disk", "filesystem", "file"):
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

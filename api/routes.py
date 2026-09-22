@@ -12,21 +12,18 @@ Endpoints:
 """
 
 import logging
-import os
-import re
-import unicodedata
+import mimetypes
 from pathlib import Path
 from typing import Optional
 
-import aiofiles
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
-from groq import AsyncGroq
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.access import client_identifier
 from core.access import guard as guard_ai
+from core.storage import StorageError, get_storage, secure_name, unique_file_name
 from core.config import settings
 from core.database import get_db
 from core.ai import make_caller
@@ -135,32 +132,6 @@ def identify_concept(text: str) -> Optional[str]:
     return None
 
 
-# ── Filename helpers ──────────────────────────────────────────────────────────
-def _secure_filename(filename: str) -> str:
-    filename = unicodedata.normalize("NFKD", filename)
-    filename = filename.encode("ascii", "ignore").decode("ascii")
-    filename = filename.replace("\x00", "").replace("/", "_").replace("\\", "_")
-    stem, _, suffix = filename.rpartition(".")
-    suffix = suffix.lower()
-    stem = re.sub(r"[^\w\-]", "_", stem or "file")
-    stem = re.sub(r"_+", "_", stem).strip("_") or "file"
-    return f"{stem}.{suffix}"
-
-
-async def _unique_disk_path(safe_name: str) -> Path:
-    target = settings.UPLOAD_DIR / safe_name
-    if not target.exists():
-        return target
-    stem = Path(safe_name).stem
-    suffix = Path(safe_name).suffix
-    counter = 1
-    while True:
-        candidate = settings.UPLOAD_DIR / f"{stem}_{counter}{suffix}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
-
-
 # ── POST /api/upload ──────────────────────────────────────────────────────────
 @router.post(
     "/upload",
@@ -196,26 +167,29 @@ async def upload_resource(
             raise HTTPException(413, f"File exceeds the {settings.MAX_UPLOAD_SIZE_MB} MB limit.")
         chunks.append(chunk)
 
-    safe_name = _secure_filename(original_name)
-    disk_path = await _unique_disk_path(safe_name)
-    final_name = disk_path.name
-
-    try:
-        async with aiofiles.open(disk_path, "wb") as f:
-            for chunk in chunks:
-                await f.write(chunk)
-    except OSError as exc:
-        raise HTTPException(500, f"Failed to save file: {exc}") from exc
+    data = b"".join(chunks)
+    storage = get_storage()
+    final_name = await unique_file_name(db, secure_name(original_name))
+    content_type = file.content_type or "application/octet-stream"
 
     resource = Resource(
         title=title.strip(),
         subject=subject.strip(),
         semester=semester,
         file_name=final_name,
-        file_path=f"/uploaded_notes/{final_name}",
+        file_path="",                       # set below, once the row has an id
     )
     db.add(resource)
-    await db.flush()
+    await db.flush()                        # assigns resource.id
+
+    try:
+        # Where the bytes go is the storage backend's business: disk by default, the
+        # database on hosts that wipe the filesystem.
+        resource.file_path = await storage.save(db, resource, data, content_type)
+        await db.flush()          # autoflush is off, and refresh() would drop it
+    except StorageError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
     await db.refresh(resource)
     return ResourceOut.model_validate(resource)
 
@@ -276,15 +250,41 @@ async def delete_note(note_id: int, db: AsyncSession = Depends(get_db)) -> Messa
     if resource is None:
         raise HTTPException(404, f"Resource id={note_id} not found.")
 
-    disk_path = settings.UPLOAD_DIR / resource.file_name
-    if disk_path.exists():
-        try:
-            os.unlink(disk_path)
-        except OSError as exc:
-            raise HTTPException(500, f"Could not delete file: {exc}") from exc
+    try:
+        await get_storage().delete(db, resource)
+    except StorageError as exc:
+        raise HTTPException(500, f"Could not delete the file: {exc}") from exc
 
     await db.delete(resource)
     return MessageResponse(message="Resource deleted.", detail=f"Removed '{resource.file_name}'.")
+
+
+# ── GET /api/notes/{id}/file ──────────────────────────────────────────────────
+@router.get("/notes/{note_id}/file", summary="Download an uploaded document")
+async def download_note(note_id: int, db: AsyncSession = Depends(get_db)):
+    """Serve the document from whatever backend holds it.
+
+    One URL for both backends, so `file_path` means the same thing everywhere and the
+    front end never needs to know where the bytes live.
+    """
+    result = await db.execute(select(Resource).where(Resource.id == note_id))
+    resource = result.scalar_one_or_none()
+    if resource is None:
+        raise HTTPException(404, f"Resource id={note_id} not found.")
+
+    media_type = mimetypes.guess_type(resource.file_name)[0] or "application/octet-stream"
+    storage = get_storage()
+    local = await storage.local_path(db, resource)
+    if local is not None:
+        return FileResponse(local, media_type=media_type, filename=resource.file_name)
+    try:
+        data = await storage.load_bytes(db, resource)
+    except StorageError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(
+        content=data, media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{secure_name(resource.file_name)}"'},
+    )
 
 
 # ── POST /api/analyze ─────────────────────────────────────────────────────────
