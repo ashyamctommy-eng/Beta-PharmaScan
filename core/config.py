@@ -144,6 +144,12 @@ class Settings(BaseSettings):
     SUMMARISE_DAILY_TOKEN_BUDGET: int = 150000 # whole app, rolling 24h
     SUMMARISE_PER_IP_DAILY_TOKENS: int = 30000 # per client, rolling 24h
     SUMMARISE_CALLS_PER_REQUEST: int = 3       # keeps a request short on shared hosting
+    # How many section expansions run at the same time inside one tick. 1 restores the
+    # old strictly-sequential path; above 1 a wide document (many sections) finishes in
+    # fewer ticks, but it multiplies the *instantaneous* load on the provider, so keep
+    # it modest on a rate-limited free tier. Env only — deliberately not in the admin
+    # panel's editable table.
+    SUMMARISE_CONCURRENCY: int = 3
     SUMMARISE_MAX_SECTIONS: int = 24           # ceiling on sections expanded per run
 
     class Config:

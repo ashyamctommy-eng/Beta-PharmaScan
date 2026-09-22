@@ -17,6 +17,7 @@ instead of paying again. Results are cached by file hash forever.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -43,6 +44,7 @@ from core.ai import (
     parse_json_lenient,
 )
 from core.config import settings
+from core.database import AsyncSessionLocal
 from core.extract import (
     CHARS_PER_TOKEN,
     Extraction,
@@ -345,50 +347,91 @@ async def run_tick(db: AsyncSession, summary: Summary, extraction: Extraction, *
             warnings.append("Depth is 'brief': the notes are built from the study map only.")
 
     # ── Stage 2: expand sections ──────────────────────────────────────────────
-    while calls < budget_calls:
-        pending = (await db.execute(
-            select(SummarySection)
-            .where(SummarySection.summary_id == summary.id, SummarySection.status == "pending")
-            .order_by(SummarySection.importance.desc(), SummarySection.page.asc())
-            .limit(1)
-        )).scalars().first()
-        if pending is None:
-            break
-        remaining, blocked = await budget_room(db, client_id)
-        if blocked:
-            return await finish("budget_exhausted", blocked)
+    concurrency = max(1, int(settings.SUMMARISE_CONCURRENCY or 1))
 
-        source = next((s for s in extraction.sections if s.id == pending.section_id), None)
-        if source is None:
-            pending.status = "skipped"
-            await db.commit()
-            continue
+    if concurrency <= 1:
+        # SUMMARISE_CONCURRENCY=1 keeps the original strictly-sequential path: one
+        # section at a time, in the shared session, in importance order. Kept verbatim
+        # so that setting it to 1 is exactly the old behaviour (and the old load).
+        while calls < budget_calls:
+            pending = (await db.execute(
+                select(SummarySection)
+                .where(SummarySection.summary_id == summary.id, SummarySection.status == "pending")
+                .order_by(SummarySection.importance.desc(), SummarySection.page.asc())
+                .limit(1)
+            )).scalars().first()
+            if pending is None:
+                break
+            remaining, blocked = await budget_room(db, client_id)
+            if blocked:
+                return await finish("budget_exhausted", blocked)
 
-        try:
-            payload, spent, used_calls, notes_warnings = await _expand_section(
-                db, caller, summary, client_id, source, map_model, remaining, pending
-            )
-            warnings.extend(notes_warnings)
-            pending.payload_json = json.dumps(payload)
-            pending.status = "done"
-            pending.tokens_spent = spent
-            summary.sections_done += 1
-            calls += used_calls          # tokens are recorded by _call(), once
+            source = next((s for s in extraction.sections if s.id == pending.section_id), None)
+            if source is None:
+                pending.status = "skipped"
+                await db.commit()
+                continue
+
+            try:
+                payload, spent, used_calls, notes_warnings = await _expand_section(
+                    db, caller, summary, client_id, source, map_model, remaining, pending
+                )
+                warnings.extend(notes_warnings)
+                pending.payload_json = json.dumps(payload)
+                pending.status = "done"
+                pending.tokens_spent = spent
+                summary.sections_done += 1
+                calls += used_calls          # tokens are recorded by _call(), once
+                await db.commit()
+            except RateLimited as exc:
+                logger.warning("Groq rate limit while expanding %s: %s", source.id, exc)
+                return await finish("rate_limited", str(exc))
+            except InvalidApiKey as exc:
+                return await finish("failed", str(exc))
+            except Exception as exc:  # noqa: BLE001 - one bad section must not kill the run
+                message = describe_error(exc)
+                logger.error("Section %s failed: %s", source.id, message)
+                pending.status = "error"
+                pending.payload_json = json.dumps({"error": message})
+                summary.sections_done += 1
+                summary.sections_failed += 1
+                warnings.append(f"Section '{source.heading}' could not be summarised: {message}")
+                await db.commit()
+    else:
+        # Parallel path: claim a small batch of pending sections, expand them
+        # concurrently, then apply their results here and commit once. Every task runs
+        # in its own session — see _expand_one_section for why that is not optional.
+        while calls < budget_calls:
+            batch_size = min(concurrency, budget_calls - calls)
+            claimed = list((await db.execute(
+                select(SummarySection.id)
+                .where(SummarySection.summary_id == summary.id, SummarySection.status == "pending")
+                .order_by(SummarySection.importance.desc(), SummarySection.page.asc())
+                .limit(batch_size)
+            )).scalars().all())
+            if not claimed:
+                break
+            remaining, blocked = await budget_room(db, client_id)
+            if blocked:
+                return await finish("budget_exhausted", blocked)
+
+            batch = await _expand_batch(caller, summary.resource_id, extraction,
+                                        claimed, map_model, client_id, remaining, concurrency)
+            for outcome in batch.outcomes:
+                warnings.extend(outcome.warnings)
+                calls += outcome.used_calls     # a failed section counts 0, as before
+                summary.sections_done += outcome.sections_done
+                summary.sections_failed += outcome.sections_failed
+            # Tokens are added by this session only, from the per-task ledgers that
+            # survived even the cancelled tasks (see _LedgerSummary): two tasks writing
+            # `summary.tokens_spent` from their own copies would lose one increment.
+            summary.tokens_spent += batch.tokens
             await db.commit()
-        except RateLimited as exc:
-            logger.warning("Groq rate limit while expanding %s: %s", source.id, exc)
-            return await finish("rate_limited", str(exc))
-        except InvalidApiKey as exc:
-            return await finish("failed", str(exc))
-        except Exception as exc:  # noqa: BLE001 - one bad section must not kill the run
-            message = describe_error(exc)
-            logger.error("Section %s failed: %s", source.id, message)
-            pending.status = "error"
-            pending.payload_json = json.dumps({"error": message})
-            summary.sections_done += 1
-            summary.sections_failed += 1
-            warnings.append(f"Section '{source.heading}' could not be summarised: {message}")
-            await db.commit()
+
+            if batch.stop == "rate_limited":
+                return await finish("rate_limited", batch.message)
+            if batch.stop:
+                return await finish("failed", batch.message)
 
     # ── Stage 3: synthesise the notes ─────────────────────────────────────────
     outstanding = (await db.execute(
@@ -524,6 +567,138 @@ async def _expand_section(db: AsyncSession, caller: Caller, summary: Summary, cl
     if not payloads:
         return {"usable": False, "reason": "no usable model output"}, spent, calls, warnings
     return _merge_payloads(payloads, section), spent, calls, warnings
+
+
+# ── Stage-2 parallelism ───────────────────────────────────────────────────────
+class _LedgerSummary:
+    """Stand-in for the `Summary` row inside one parallel section task.
+
+    `_call()` records usage and does `summary.tokens_spent += tokens` on whatever object
+    it is handed. Two tasks doing that read-modify-write on the *same* ORM row would each
+    write back a total that misses the other's tokens (lost update), so each task counts
+    its own spend here and the tick's session adds the ledgers once, after the batch.
+    """
+
+    def __init__(self, resource_id: int) -> None:
+        self.resource_id = resource_id
+        self.tokens_spent = 0
+
+
+@dataclass
+class _SectionOutcome:
+    section_id: str                   # the extraction id, for messages
+    status: str                       # done | error | skipped
+    used_calls: int = 0
+    sections_done: int = 0
+    sections_failed: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _BatchResult:
+    outcomes: list[_SectionOutcome] = field(default_factory=list)
+    tokens: int = 0                   # tokens spent by the whole batch (incl. cancelled tasks)
+    stop: str = ""                    # "" | "rate_limited" | "failed"
+    message: str = ""
+
+
+async def _expand_one_section(caller: Caller, extraction: Extraction, row_id: int,
+                              model: str, client_id: str, remaining: int,
+                              ledger: _LedgerSummary) -> _SectionOutcome:
+    """Expand ONE section, in its OWN session, with no lease handling.
+
+    The session is opened here and closed in every path: a SQLAlchemy AsyncSession (and
+    the connection under it) is not safe to use from two tasks at once, so the tick's
+    session must never be touched from inside a batch task. `ledger` is created by the
+    batch driver, so the tokens this task spends are visible even if it is cancelled.
+    """
+    async with AsyncSessionLocal() as task_db:
+        row = await task_db.get(SummarySection, row_id)
+        if row is None or row.status != "pending":
+            return _SectionOutcome(section_id=str(row_id), status="skipped")
+        source = next((s for s in extraction.sections if s.id == row.section_id), None)
+        if source is None:
+            row.status = "skipped"
+            await task_db.commit()
+            return _SectionOutcome(section_id=row.section_id, status="skipped")
+
+        try:
+            payload, spent, used_calls, section_warnings = await _expand_section(
+                task_db, caller, ledger, client_id, source, model, remaining, row
+            )
+        except (RateLimited, InvalidApiKey):
+            # Leave the row pending: _expand_section already committed the chunks that
+            # succeeded, so the next tick resumes without re-paying for them.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad section must not kill the run
+            message = describe_error(exc)
+            logger.error("Section %s failed: %s", source.id, message)
+            row.status = "error"
+            row.payload_json = json.dumps({"error": message})
+            await task_db.commit()
+            # Same accounting as the sequential path: an errored section counts as done
+            # *and* failed, and its calls are not charged against the tick's budget.
+            return _SectionOutcome(
+                section_id=source.id, status="error", sections_done=1, sections_failed=1,
+                warnings=[f"Section '{source.heading}' could not be summarised: {message}"],
+            )
+
+        row.payload_json = json.dumps(payload)
+        row.status = "done"
+        row.tokens_spent = spent
+        await task_db.commit()
+        return _SectionOutcome(section_id=source.id, status="done", used_calls=used_calls,
+                               sections_done=1, warnings=section_warnings)
+
+
+async def _expand_batch(caller: Caller, resource_id: int,
+                        extraction: Extraction, row_ids: list[int], model: str,
+                        client_id: str, remaining: int, concurrency: int) -> _BatchResult:
+    """Expand up to `len(row_ids)` sections concurrently and collect their outcomes.
+
+    Bounded two ways: the caller passes no more ids than the tick may still spend calls,
+    and the semaphore caps how many model calls are in flight at once. A rate limit or a
+    rejected key stops the batch (the rest are cancelled, committed work is kept); any
+    other failure stays inside its own section.
+    """
+    semaphore = asyncio.Semaphore(concurrency)
+    ledgers = {row_id: _LedgerSummary(resource_id) for row_id in row_ids}
+
+    async def expand(row_id: int) -> _SectionOutcome:
+        async with semaphore:
+            return await _expand_one_section(caller, extraction, row_id, model, client_id,
+                                             remaining, ledgers[row_id])
+
+    tasks = {asyncio.create_task(expand(row_id)) for row_id in row_ids}
+    outcomes: list[_SectionOutcome] = []
+    stop = ""
+    message = ""
+    while tasks:
+        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                outcomes.append(task.result())
+            except RateLimited as exc:
+                logger.warning("Groq rate limit while expanding a batch: %s", exc)
+                stop, message = "rate_limited", str(exc)
+            except InvalidApiKey as exc:
+                stop, message = "failed", str(exc)
+            except Exception as exc:  # noqa: BLE001 - defensive: never kill the whole tick
+                logger.error("Section expansion crashed: %s", describe_error(exc))
+                stop, message = "failed", describe_error(exc)
+        if stop:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                # Wait for the cancelled tasks to unwind their sessions before the
+                # tick's session commits again.
+                await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = set()
+    logger.debug("Section batch finished: %s",
+                 ", ".join(f"{outcome.section_id}:{outcome.status}" for outcome in outcomes) or "none")
+    return _BatchResult(outcomes=outcomes,
+                        tokens=sum(ledger.tokens_spent for ledger in ledgers.values()),
+                        stop=stop, message=message)
 
 
 def _split_text(text: str, chunk_chars: int) -> list[str]:

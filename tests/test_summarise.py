@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,18 @@ class StubCaller:
                              estimate_tokens(user) + 60, payload)
 
 
+class SlowStubCaller(StubCaller):
+    """Same stub, but every call takes `delay` seconds — so parallelism is measurable."""
+
+    def __init__(self, delay: float = 0.15, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.delay = delay
+
+    async def call(self, **kwargs):
+        await asyncio.sleep(self.delay)
+        return await super().call(**kwargs)
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fake_extraction(sections: int = 4, tokens_each: int = 300) -> Extraction:
     parts = [
@@ -110,8 +123,15 @@ class PipelineCase(unittest.TestCase):
         self.db_path = Path(self._dir.name) / "test.db"
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
         self.Session = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+        # Stage 2 opens one session PER PARALLEL TASK from core.database.AsyncSessionLocal.
+        # Point that at this private engine, or the parallel path would write to the
+        # developer's real database.
+        self._real_session_local = S.AsyncSessionLocal
+        S.AsyncSessionLocal = self.Session
+        self._seq = 0
         self._original = {
             "SUMMARISE_CALLS_PER_REQUEST": S.settings.SUMMARISE_CALLS_PER_REQUEST,
+            "SUMMARISE_CONCURRENCY": S.settings.SUMMARISE_CONCURRENCY,
             "SUMMARISE_DAILY_TOKEN_BUDGET": S.settings.SUMMARISE_DAILY_TOKEN_BUDGET,
             "SUMMARISE_PER_IP_DAILY_TOKENS": S.settings.SUMMARISE_PER_IP_DAILY_TOKENS,
             "SUMMARISE_MAX_SECTIONS": S.settings.SUMMARISE_MAX_SECTIONS,
@@ -121,6 +141,7 @@ class PipelineCase(unittest.TestCase):
         asyncio.run(self._create_schema())
 
     def tearDown(self) -> None:
+        S.AsyncSessionLocal = self._real_session_local
         for key, value in self._original.items():
             setattr(S.settings, key, value)
         asyncio.run(self.engine.dispose())
@@ -131,8 +152,9 @@ class PipelineCase(unittest.TestCase):
             await conn.run_sync(Base.metadata.create_all)
 
     async def _new_summary(self, depth: str = "standard") -> Summary:
+        self._seq += 1
         async with self.Session() as db:
-            summary = Summary(resource_id=1, file_hash="hash-" + depth + str(id(self)),
+            summary = Summary(resource_id=1, file_hash=f"hash-{depth}-{id(self)}-{self._seq}",
                               file_name="notes.pdf", depth=depth, status="pending")
             db.add(summary)
             await db.commit()
@@ -670,6 +692,150 @@ class TestMergingAndHelpers(unittest.TestCase):
                    "drug_table": [{"name": f"D{i}"}]} for i in range(60)]
         digest = S._digest_for_reduce(topics)
         self.assertLess(len(digest), S.settings.SUMMARISE_MAX_INPUT_TOKENS * 4)
+
+
+
+
+class TestParallelSectionExpansion(PipelineCase):
+    """Stage 2 with SUMMARISE_CONCURRENCY > 1: identical results, less wall-clock,
+    one session per task, and the per-tick call budget still bounded."""
+
+    def _section_states(self, summary: Summary) -> dict[str, tuple[str, str]]:
+        from sqlalchemy import select
+
+        async def read() -> dict[str, tuple[str, str]]:
+            async with self.Session() as db:
+                rows = (await db.execute(
+                    select(SummarySection).where(SummarySection.summary_id == summary.id)
+                )).scalars().all()
+                return {row.section_id: (row.status, row.payload_json) for row in rows}
+
+        return asyncio.run(read())
+
+    def test_parallel_batch_is_faster_and_writes_the_same_state(self) -> None:
+        delay, sections = 0.15, 4
+        runs: dict[int, tuple[float, S.TickResult, StubCaller, Summary, Extraction]] = {}
+        for concurrency in (1, 4):
+            extraction = fake_extraction(sections=sections)
+            summary = asyncio.run(self._new_summary(depth="full"))
+            caller = SlowStubCaller(delay=delay)
+            S.settings.SUMMARISE_CONCURRENCY = concurrency
+            # The first tick spends its single call on the outline, so the timed tick is
+            # pure stage-2 work: 4 sections x delay when sequential, one batch otherwise.
+            outline = asyncio.run(self._tick(summary, extraction, caller, max_calls=1))
+            self.assertEqual(outline.status, "running", outline.message)
+
+            started = time.perf_counter()
+            result = asyncio.run(self._tick(summary, extraction, caller, max_calls=sections))
+            elapsed = time.perf_counter() - started
+            runs[concurrency] = (elapsed, result, caller, summary, extraction)
+
+            self.assertEqual(result.status, "running")
+            self.assertEqual(result.sections_done, sections)
+            self.assertEqual(sum(1 for c in caller.calls if c["kind"] == "section"), sections)
+
+        sequential, parallel = runs[1][0], runs[4][0]
+        self.assertGreaterEqual(sequential, 1.8 * parallel,
+                                f"4 parallel sections must beat the sequential path by "
+                                f"1.8x (took {sequential:.2f}s vs {parallel:.2f}s)")
+
+        # Same rows, in the same state, and the same notes once the run is finished.
+        self.assertEqual(self._section_states(runs[1][3]), self._section_states(runs[4][3]))
+        notes = {}
+        for concurrency, (_, _, caller, summary, extraction) in runs.items():
+            final = asyncio.run(self._tick(summary, extraction, caller, max_calls=10))
+            self.assertEqual(final.status, "done", final.message)
+            self.assertEqual(final.sections_failed, 0)
+            notes[concurrency] = final.notes
+        # Only the per-document identity/timestamp may differ (they are different summaries).
+        def strip(notes: dict) -> dict:
+            return {k: v for k, v in notes.items() if k not in ("file_hash", "generated_at")}
+
+        self.assertEqual(strip(notes[1]), strip(notes[4]),
+                         "parallelism must not change the notes")
+
+    def test_call_budget_is_honoured_with_concurrency(self) -> None:
+        extraction = fake_extraction(sections=6)
+        summary = asyncio.run(self._new_summary(depth="full"))
+        caller = StubCaller()
+        S.settings.SUMMARISE_CONCURRENCY = 4
+
+        result = asyncio.run(self._tick(summary, extraction, caller, max_calls=3))
+
+        self.assertEqual(len(caller.calls), 3, "a tick must never exceed its call budget")
+        kinds = [c["kind"] for c in caller.calls]
+        self.assertEqual(kinds.count("outline"), 1)
+        self.assertEqual(kinds.count("section"), 2,
+                         "the batch must be clamped to the remaining budget (3 - outline)")
+        self.assertEqual(result.status, "running")
+        self.assertEqual(result.sections_done, 2)
+
+    def test_a_failing_section_does_not_lose_its_batch(self) -> None:
+        extraction = fake_extraction(sections=4)
+        summary = asyncio.run(self._new_summary(depth="full"))
+
+        class OneBadSection(StubCaller):
+            async def call(self, **kwargs):
+                if kwargs["kind"] == "section" and "3. Topic 3" in kwargs["user"]:
+                    raise RuntimeError("provider exploded")
+                await asyncio.sleep(0.02)
+                return await super().call(**kwargs)
+
+        caller = OneBadSection()
+        S.settings.SUMMARISE_CONCURRENCY = 4
+        result = asyncio.run(self._tick(summary, extraction, caller, max_calls=10))
+
+        self.assertEqual(result.status, "done", result.message)
+        self.assertEqual(result.sections_done, 4, "an errored section still counts as done")
+        self.assertEqual(result.sections_failed, 1)
+        self.assertTrue(any("3. Topic 3" in w for w in result.warnings), result.warnings)
+
+        states = self._section_states(summary)
+        self.assertEqual(states["s3"][0], "error")
+        self.assertIn("provider exploded", states["s3"][1])
+        for section_id in ("s1", "s2", "s4"):
+            self.assertEqual(states[section_id][0], "done",
+                             f"{section_id} must still complete when a sibling fails")
+        self.assertTrue(result.notes and result.notes["topics"],
+                        "the surviving sections must still produce notes")
+
+    def test_rate_limit_inside_a_batch_parks_the_run_and_resumes(self) -> None:
+        extraction = fake_extraction(sections=4)
+        summary = asyncio.run(self._new_summary(depth="full"))
+
+        class RateLimitsOneSection(StubCaller):
+            async def call(self, **kwargs):
+                if kwargs["kind"] == "section" and "3. Topic 3" in kwargs["user"]:
+                    exc = RuntimeError("rate limited")
+                    exc.status_code = 429                       # type: ignore[attr-defined]
+                    exc.response = type("R", (), {"headers": {}})()
+                    raise exc
+                await asyncio.sleep(0.15)
+                return await super().call(**kwargs)
+
+        S.settings.SUMMARISE_CONCURRENCY = 4
+        result = asyncio.run(self._tick(summary, extraction, RateLimitsOneSection(), max_calls=10))
+        self.assertEqual(result.status, "rate_limited")
+        self.assertIn("rate-limit", result.message.lower())
+        self.assertEqual(sum(1 for s in self._section_states(summary).values() if s[0] == "error"), 0,
+                         "a rate limit must not mark a section failed")
+
+        resumed = asyncio.run(self._tick(summary, extraction, StubCaller(), max_calls=10))
+        self.assertEqual(resumed.status, "done", resumed.message)
+        self.assertEqual(resumed.sections_done, 4)
+
+    def test_concurrency_one_runs_the_sequential_path(self) -> None:
+        extraction = fake_extraction(sections=3)
+        summary = asyncio.run(self._new_summary(depth="full"))
+        caller = StubCaller()
+        S.settings.SUMMARISE_CONCURRENCY = 1
+
+        result = asyncio.run(self._tick(summary, extraction, caller, max_calls=10))
+
+        self.assertEqual(result.status, "done")
+        self.assertEqual(sum(1 for c in caller.calls if c["kind"] == "section"), 3)
+        self.assertEqual(result.sections_done, 3)
+        self.assertEqual(result.sections_failed, 0)
 
 
 if __name__ == "__main__":
