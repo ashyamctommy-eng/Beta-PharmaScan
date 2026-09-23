@@ -39,6 +39,13 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <!-- DOMPurify for XSS sanitisation -->
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <!-- KaTeX — the model answers with LaTeX, so formulas must be typeset, not shown raw -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.9/dist/katex.min.css"
+        integrity="sha384-lPx0C4zIUZLpveABMwOFcFeGZwsvKBJfhJ85FN1PYOV7xApBcFMhcAEMVKF8loOI" crossorigin="anonymous" />
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.18.9/dist/katex.min.js"
+          integrity="sha384-19KE2cFb3U+RUWmyhBz7aLOGDG8WrRC6hE3oY/HTZZlAAVWYTdmvLC//+TIV3zUx" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.18.9/dist/contrib/auto-render.min.js"
+          integrity="sha384-bjyGPfbij8/NDKJhSGZNP/khQVgtHUE5exjm4Ydllo42FwIgYsdLO2lXGmRBf5Mz" crossorigin="anonymous"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; }
@@ -163,6 +170,12 @@
       background: #fff;
     }
 
+    /* ── Typeset formulas (KaTeX) ── */
+    .katex { font-size: 1.02em; }
+    /* a long equation scrolls inside its card instead of overflowing the page */
+    .katex-display { margin: .75rem 0; padding: .25rem 0; overflow-x: auto; overflow-y: hidden; }
+    .katex-display > .katex { white-space: normal; }
+
     /* Pharmacy180 callout */
     .pharmacy180-block {
       border: 2px solid #0d9488;
@@ -217,7 +230,7 @@
       #summary-modal > div { box-shadow: none !important; max-width: none !important; margin: 0 !important; border-radius: 0 !important; }
       #summary-body { max-height: none !important; overflow: visible !important; }
       .no-print { display: none !important; }
-      .note-bullet, .page-chip { break-inside: avoid; }
+      .note-bullet, .page-chip, .katex-display { break-inside: avoid; }
     }
 
     /* Scrollbar thin */
@@ -734,6 +747,76 @@
   function esc(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
+
+  /* ── Maths (LaTeX) ───────────────────────────────────
+     The model writes formulas as LaTeX — `\( C_1V_1 = C_2V_2 \)` inline and
+     `\[ n = \frac{m}{M} \]` for a standalone equation. Markdown treats a
+     backslash before punctuation as an escape, so `\(` reached the screen as
+     `(` and `\[` as `[`, and the underscores in `C_{\text{acid}}` were read as
+     emphasis: formulas arrived as mangled plain text.
+
+     Fix: lift every formula out of the text *before* Markdown sees it, park it
+     behind a placeholder, then put it back as `\( … \)` / `$$ … $$` once the
+     HTML is built, and let KaTeX typeset it. The formula body never passes
+     through Markdown, so its backslashes and underscores survive intact. */
+  const MATH_SLOT = i => `PHARMASCANMATH${i}ENDMATH`;
+  const MATH_SLOT_RE = /PHARMASCANMATH(\d+)ENDMATH/g;
+
+  function protectMath(text) {
+    const store = [];
+    const keep = (latex, display) => {
+      const key = MATH_SLOT(store.length);
+      // Canonical delimiters — KaTeX's auto-render understands \( \) and $$ $$.
+      store.push(display ? `$$${latex}$$` : `\\(${latex}\\)`);
+      return key;
+    };
+    let out = String(text == null ? '' : text);
+
+    // \begin{align}…\end{align} and friends: display maths.
+    out = out.replace(/\\begin\{([A-Za-z*]+)\}([\s\S]*?)\\end\{\1\}/g, m => keep(m, true));
+    out = out.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner) => keep(inner, true));
+    out = out.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner) => keep(inner, false));
+    out = out.replace(/\$\$([\s\S]*?)\$\$/g, (_m, inner) => keep(inner, true));
+    out = out.replace(/\$([^\n$]{1,300}?)\$/g, (m, inner) =>
+      // "$5 per tablet" is money, "$C_1V_1$" is maths — only the second holds LaTeX.
+      /[\\^_{}]/.test(inner) ? keep(inner, false) : m);
+    return { text: out, store };
+  }
+
+  function restoreMath(html, store) {
+    if (!store.length) return html;
+    return html.replace(MATH_SLOT_RE, (m, i) => {
+      const latex = store[Number(i)];
+      // Re-inserted as text: HTML-escape it, and let KaTeX read it back off the DOM.
+      return latex === undefined ? m
+        : latex.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    });
+  }
+
+  /* Typeset any LaTeX left in `el` (safe to call on plain-text output too). */
+  function typesetMath(el) {
+    if (!el || typeof renderMathInElement !== 'function') return;  // CDN blocked: show the raw LaTeX
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '\\[', right: '\\]', display: true },
+          { left: '\\(', right: '\\)', display: false },
+        ],
+        throwOnError: false,   // one bad formula shows itself in red; nothing else breaks
+        ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'option'],
+      });
+    } catch (e) { /* maths is a nicety — never take the page down for it */ }
+  }
+
+  /* Markdown + formulas → sanitised, typeset HTML. */
+  function renderMarkdownInto(el, text) {
+    const { text: safe, store } = protectMath(text);
+    el.innerHTML = restoreMath(DOMPurify.sanitize(marked.parse(safe), {
+      ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
+    }), store);
+    typesetMath(el);
+  }
   function semLabel(c) {
     return { Y1S1:'Year 1 · S1', Y1S2:'Year 1 · S2', Y2S1:'Year 2 · S1',
              Y2S2:'Year 2 · S2', Y3S1:'Year 3 · S1', Y3S2:'Year 3 · S2' }[c] || c;
@@ -1099,10 +1182,7 @@
 
       rawAnalysis = d.analysis;
       lastConcept = d.concept || '';
-      const html = DOMPurify.sanitize(marked.parse(d.analysis), {
-        ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
-      });
-      $('analysis-output').innerHTML = html;
+      renderMarkdownInto($('analysis-output'), d.analysis);
 
       const meta = [d.model ? `Model: ${d.model}` : null, d.tokens_used ? `${d.tokens_used} tokens` : null]
         .filter(Boolean).join(' · ');
@@ -1217,9 +1297,7 @@
         const item = all.find(s => s.id === id);
         if (!item) return;
         $('view-modal-title').textContent = item.title;
-        $('view-modal-body').innerHTML = DOMPurify.sanitize(marked.parse(item.markdown), {
-          ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
-        });
+        renderMarkdownInto($('view-modal-body'), item.markdown);
         $('view-analysis-modal').classList.remove('hidden');
       });
     });
@@ -1589,6 +1667,7 @@
     }
 
     $('summary-body').innerHTML = html;
+    typesetMath($('summary-body'));   // bullets can carry formulas too
     $('summary-footer').innerHTML = `
       <span class="text-xs text-slate-400">Every bullet keeps its page number — check it against the original.</span>
       <span class="flex items-center gap-2">

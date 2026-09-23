@@ -79,6 +79,11 @@ MANDATORY FORMATTING RULES:
 7. Keep explanations at D.Pharm level — precise, clinically relevant, accessible to diploma students.
 8. Reference CDACC syllabus topics where applicable.
 9. End every response with a ## Key Takeaways section with 3–5 bullet clinical points.
+10. Write every formula, equation and calculation as LaTeX inside delimiters: inline maths as
+    \\( ... \\), and a standalone equation as \\[ ... \\] on its own line. Never present a
+    formula as bare text ("C1V1 = C2V2") and never omit the backslashes — they are what make
+    the mathematics typeset. Example:
+    \\[ C_{\\text{acid}} = \\frac{C_{\\text{NaOH}} \\times V_{\\text{NaOH}}}{V_{\\text{acid}}} \\]
 
 Do not use emojis in the main analysis body.
 """
