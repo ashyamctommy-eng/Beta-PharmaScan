@@ -1,0 +1,46 @@
+name: tests
+
+# There was no CI at all: 162 tests and a browser-side maths contract, all of it relying on
+# someone remembering to run them. This is the "remembering" part.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: unittest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor the README claims; 3.12 is what the Dockerfile ships.
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run the test suite
+        # No API key and no network: the suite drives the pipeline with stub callers.
+        run: python -m unittest discover -s tests -t .
+
+  frontend:
+    name: browser-side helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Run the browser-side checks
+        # These lift the helper blocks out of templates/index.html and drive them for real:
+        # the LaTeX delimiters (a formula must not reach a student as `(V_{\text{NaOH}}`),
+        # and the device vault's storage rules (a full localStorage must not lose data
+        # silently). Every tests/js/*_check.js is run, so a new one is picked up by name.
+        run: for check in tests/js/*_check.js; do echo "== $check"; node "$check" || exit 1; done

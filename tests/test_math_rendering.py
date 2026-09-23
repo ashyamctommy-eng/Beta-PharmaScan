@@ -9,16 +9,14 @@ it and typesets it with KaTeX afterwards.
 
 Typesetting happens in the browser, so this file covers what can honestly be covered without
 one: the template still loads KaTeX, every place that renders model output goes through the
-single `renderMarkdownInto` helper, the model is told how to write formulas, and the
-delimiter contract itself (run against the shipped helper block by tests/js/*.js) holds.
+single `renderMarkdownInto` helper, and the model is told how to write formulas. The helper
+blocks themselves are driven under node by tests/test_frontend_helpers.py.
 
     python -m unittest discover -s tests -t .
 """
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -29,7 +27,6 @@ sys.path.insert(0, str(ROOT))
 from api.routes import SYSTEM_PROMPT  # noqa: E402
 
 TEMPLATE = ROOT / "templates" / "index.html"
-JS_CHECK = ROOT / "tests" / "js" / "math_delimiters_check.js"
 
 
 class TestTemplateLoadsKatex(unittest.TestCase):
@@ -111,19 +108,6 @@ class TestModelIsToldHowToWriteMaths(unittest.TestCase):
         self.assertIn(r"\text{acid}", SYSTEM_PROMPT)
         self.assertIn(r"\frac", SYSTEM_PROMPT)
         self.assertNotIn("\t", SYSTEM_PROMPT)
-
-
-class TestDelimiterContract(unittest.TestCase):
-    """Runs the shipped helper block under node, if node is available."""
-
-    @unittest.skipIf(shutil.which("node") is None, "node is not installed")
-    def test_delimiters_are_parked_before_markdown_and_restored_after(self) -> None:
-        result = subprocess.run(
-            [shutil.which("node"), str(JS_CHECK)],
-            capture_output=True, text=True, timeout=60,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("0 failed", result.stdout)
 
 
 if __name__ == "__main__":

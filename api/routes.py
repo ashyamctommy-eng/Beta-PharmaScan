@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.access import client_identifier
 from core.access import guard as guard_ai
 from core.storage import StorageError, get_storage, secure_name, unique_file_name
+from core.structures import StructureNotFound, StructureUnavailable, get_structure
 from core.config import settings
 from core.database import get_db
 from core.ai import make_caller
@@ -42,6 +43,32 @@ from schemas.resource import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["pharmascan"])
+
+
+# ── Structure images ──────────────────────────────────────────────────────────
+@router.get("/structure/{term:path}", include_in_schema=False)
+async def structure_image(term: str) -> Response:
+    """A drug's structure image, fetched from PubChem once and cached on the volume.
+
+    The analysis prompt embeds PubChem URLs; templates/index.html rewrites those to this
+    path, so one student's fetch serves everyone, and a slow PubChem no longer shows up
+    as a broken image on every page view. Not in the schema — it is a rendering detail
+    of /api/analyze, not a documented API.
+    """
+    try:
+        png = await get_structure(term)
+    except StructureNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No PubChem structure image for that compound.")
+    except StructureUnavailable:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The structure library is unreachable right now.")
+    return Response(
+        content=png,
+        media_type="image/png",
+        # A structure never changes: let the browser keep it, and skip the round-trip.
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
+    )
 
 # ── AI transport (Groq SDK, or any OpenAI-compatible endpoint) ───────────────
 def get_caller():

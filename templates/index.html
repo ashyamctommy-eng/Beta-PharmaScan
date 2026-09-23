@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PharmaScanKE — D.Pharma Study Vault &amp; AI Analysis</title>
 
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Style, pinned: the Play CDN serves "latest" by default, so a Tailwind release could
+       restyle the page without a single commit here. 3.4.17 is the build live today. -->
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -35,10 +37,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- marked.js for Markdown rendering -->
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <!-- marked.js for Markdown rendering (pinned + integrity: a CDN compromise or a silent
+       version bump would otherwise run new code in every student's browser) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"
+          integrity="sha384-NNQgBjjuhtXzPmmy4gurS5X7P4uTt1DThyevz4Ua0IVK5+kazYQI1W27JHjbbxQz" crossorigin="anonymous"></script>
   <!-- DOMPurify for XSS sanitisation -->
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+          integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a" crossorigin="anonymous"></script>
   <!-- KaTeX — the model answers with LaTeX, so formulas must be typeset, not shown raw -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.9/dist/katex.min.css"
         integrity="sha384-lPx0C4zIUZLpveABMwOFcFeGZwsvKBJfhJ85FN1PYOV7xApBcFMhcAEMVKF8loOI" crossorigin="anonymous" />
@@ -169,6 +174,8 @@
       border: 1px solid #e2e8f0;
       background: #fff;
     }
+    /* Said in words when a structure image cannot be fetched — never a broken icon */
+    .structure-missing { display: block; text-align: center; font-size: .75rem; color: #94a3b8; margin: .75rem 0; }
 
     /* ── Typeset formulas (KaTeX) ── */
     .katex { font-size: 1.02em; }
@@ -809,12 +816,35 @@
     } catch (e) { /* maths is a nicety — never take the page down for it */ }
   }
 
+  /* ── Structure images ────────────────────────────────
+     The model illustrates each drug with PubChem's PNG. Fetching that from the student's
+     browser costs a request per drug per view; /api/structure serves the same image from
+     one cached fetch, shared by everyone. Rewriting the URL here (rather than asking the
+     model for a relative path) means analyses saved months ago benefit too. */
+  const PUBCHEM_IMAGE = /^https?:\/\/(?:www\.)?pubchem\.ncbi\.nlm\.nih\.gov\/rest\/pug\/compound\/(name|cid)\/([^"'/?#]+)\/PNG$/i;
+
+  function localiseStructures(el) {
+    el.querySelectorAll('img[src]').forEach(img => {
+      const match = PUBCHEM_IMAGE.exec(img.getAttribute('src') || '');
+      if (!match) return;
+      img.setAttribute('src', `/api/structure/${match[1]}/${match[2]}`);
+      img.setAttribute('loading', 'lazy');   // one analysis can name a dozen drugs
+      img.addEventListener('error', () => {
+        const note = document.createElement('span');
+        note.className = 'structure-missing';
+        note.textContent = `Structure of ${img.getAttribute('alt') || 'this compound'} is unavailable right now.`;
+        img.replaceWith(note);
+      }, { once: true });
+    });
+  }
+
   /* Markdown + formulas → sanitised, typeset HTML. */
   function renderMarkdownInto(el, text) {
     const { text: safe, store } = protectMath(text);
     el.innerHTML = restoreMath(DOMPurify.sanitize(marked.parse(safe), {
       ADD_TAGS: ['img'], ADD_ATTR: ['src', 'alt', 'title'],
     }), store);
+    localiseStructures(el);
     typesetMath(el);
   }
   function semLabel(c) {
@@ -1212,7 +1242,7 @@
 
   function saveAnalysisToVault() {
     if (!rawAnalysis) { showToast('No analysis to save yet — run an analysis first.', 'info'); return; }
-    const saved = JSON.parse(localStorage.getItem('saved_pharma_notes') || '[]');
+    const saved = getSavedNotes();
     const title = ($('analysis-prompt').value.trim().slice(0, 90)) || 'Untitled Analysis';
     const entry = {
       id: Date.now(),
@@ -1223,18 +1253,68 @@
       markdown: rawAnalysis,
     };
     saved.unshift(entry);
-    putSavedNotes(saved);
-    showToast('✅ Analysis saved to device vault!', 'success');
+    const res = putSavedNotes(saved);
+    if (!res.ok) {
+      showToast(res.reason === 'too-large'
+        ? 'This analysis is too long to keep on this device — copy it out instead.'
+        : 'This device is out of storage for saved analyses — delete one or two, then save again.', 'error');
+      return;
+    }
+    showToast(res.dropped
+      ? `Analysis saved. ${res.dropped} older one${res.dropped === 1 ? '' : 's'} removed to stay within this device's storage.`
+      : '✅ Analysis saved to device vault!',
+      res.dropped ? 'info' : 'success');
     renderSavedCards();
   }
 
   /* ── Render Saved Cards ──────────────────────────────── */
+  /* ── Device vault: bounded, and honest when it fails ─────────────────────
+     localStorage is about 5 MB per origin and setItem throws once it is full. That
+     throw used to be swallowed, so for a heavy user the newest analysis silently never
+     appeared. Keep the vault inside a budget we control, evict oldest first (the list is
+     newest-first), and let the caller report what actually happened. */
+  const VAULT_KEY       = 'saved_pharma_notes';
+  const VAULT_MAX_ITEMS = 40;
+  const VAULT_MAX_CHARS = 2000000;   // ≈ 4 MB of UTF-16 — half the usual quota
+
   function getSavedNotes() {
-    try { return JSON.parse(localStorage.getItem('saved_pharma_notes') || '[]'); }
-    catch { return []; }
+    try {
+      const raw = JSON.parse(localStorage.getItem(VAULT_KEY) || '[]');
+      return Array.isArray(raw) ? raw : [];
+    } catch { return []; }
   }
+
+  function vaultChars(list) { return JSON.stringify(list).length; }
+
+  /* Drop the oldest entries until the vault fits the budget we set. */
+  function trimVault(list) {
+    const kept = list.slice();
+    let dropped = 0;
+    while (kept.length > 1 && (kept.length > VAULT_MAX_ITEMS || vaultChars(kept) > VAULT_MAX_CHARS)) {
+      kept.pop(); dropped++;
+    }
+    return { kept, dropped };
+  }
+
+  /* Returns {ok, reason, dropped}. Never throws — the browser is the one that runs out. */
   function putSavedNotes(arr) {
-    try { localStorage.setItem('saved_pharma_notes', JSON.stringify(arr)); } catch { /* quota full */ }
+    let { kept, dropped } = trimVault(arr);
+    // Still over budget with a single entry left: refuse honestly. Storing it would take
+    // the whole quota hostage, so every later save would fail instead.
+    if (vaultChars(kept) > VAULT_MAX_CHARS) return { ok: false, reason: 'too-large', dropped };
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        localStorage.setItem(VAULT_KEY, JSON.stringify(kept));
+        return { ok: true, dropped };
+      } catch (e) {
+        // Not the size we budgeted for: private mode, or another key took the space.
+        if (kept.length <= 1) break;
+        const cut = Math.max(1, Math.ceil(kept.length / 2));
+        kept = kept.slice(0, kept.length - cut);
+        dropped += cut;
+      }
+    }
+    return { ok: false, reason: 'quota', dropped };
   }
 
   function renderSavedCards() {
