@@ -599,6 +599,10 @@
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
               Copy
             </button>
+            <button id="copy-plain" title="Copy as plain text, with formulas readable" class="text-xs text-slate-500 hover:text-slate-700 font-medium flex items-center gap-1 transition-colors">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+              Copy text
+            </button>
             <button id="save-analysis" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium flex items-center gap-1 transition-colors border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-lg">
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
               Save to Vault
@@ -836,6 +840,157 @@
         img.replaceWith(note);
       }, { once: true });
     });
+  }
+
+  /* ── Formulas as plain text ─────────────────────────
+     "Copy" gives the Markdown source, which is right for pasting somewhere that renders
+     it — and wrong for an assignment: Word would show \(C_{\text{acid}} = \frac{a}{b}\).
+     This converts a formula into something readable, so an answer can be handed in.
+     Best effort by design — a text conversion, not a typesetter. */
+  const GREEK = {
+    alpha:'α', beta:'β', gamma:'γ', Gamma:'Γ', delta:'δ', Delta:'Δ', epsilon:'ε',
+    varepsilon:'ε', zeta:'ζ', eta:'η', theta:'θ', vartheta:'θ', iota:'ι', kappa:'κ',
+    lambda:'λ', Lambda:'Λ', mu:'µ', nu:'ν', xi:'ξ', Xi:'Ξ', pi:'π', Pi:'Π', rho:'ρ',
+    varrho:'ρ', sigma:'σ', Sigma:'Σ', tau:'τ', upsilon:'υ', phi:'φ', varphi:'φ',
+    Phi:'Φ', chi:'χ', psi:'ψ', Psi:'Ψ', omega:'ω', Omega:'Ω',
+  };
+  const MATH_SYMBOLS = {
+    times:'×', cdot:'·', div:'÷', pm:'±', mp:'∓', leq:'≤', le:'≤', geq:'≥', ge:'≥',
+    neq:'≠', ne:'≠', approx:'≈', equiv:'≡', sim:'∼', propto:'∝', to:'→',
+    rightarrow:'→', Rightarrow:'⇒', leftarrow:'←', leftrightarrow:'↔',
+    sum:'Σ', prod:'Π', int:'∫', ldots:'…', dots:'…', cdots:'…',
+  };
+  // Symbols that belong to the word after them — LaTeX eats the space, so "\mu g" is one
+  // unit and must come out as "μg", not "µ g".
+  const UNIT_SYMBOLS = {
+    degree:'°', partial:'∂', nabla:'∇', infty:'∞', perp:'⊥', angle:'∠',
+    therefore:'∴', because:'∵',
+  };
+  const SUPERSCRIPTS = { '0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','-':'⁻','+':'⁺','n':'ⁿ' };
+  const SUBSCRIPTS   = { '0':'₀','1':'₁','2':'₂','3':'₃','4':'₄','5':'₅','6':'₆','7':'₇','8':'₈','9':'₉','-':'₋','+':'₊' };
+  // t_{1/2} is how half-life is written in every pharmacology note ever.
+  const FRACTIONS = { '1/2':'½', '1/3':'⅓', '2/3':'⅔', '1/4':'¼', '3/4':'¾', '1/8':'⅛' };
+
+  function mapChars(text, table) {
+    return String(text).split('').map(ch => table[ch] || ch).join('');
+  }
+
+  /* The balanced {…} group starting at `start` (which must be "{"), and where it ends. */
+  function takeGroup(text, start) {
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}') {
+        depth--;
+        if (!depth) return [text.slice(start + 1, i), i + 1];
+      }
+    }
+    return null;                                  // unbalanced — caller leaves it alone
+  }
+
+  /* \frac{a}{b} → (a)/(b), brace-aware, so the a and b may themselves contain braces. */
+  function expandFractions(text) {
+    const finder = /\\(?:d|t)?frac\s*/;
+    let out = text;
+    for (let guard = 0; guard < 200; guard++) {
+      const match = finder.exec(out);
+      if (!match) break;
+      const open = match.index + match[0].length;
+      if (out[open] !== '{') break;               // \frac12 shorthand: leave it for the symbol pass
+      const numerator = takeGroup(out, open);
+      if (!numerator) break;
+      if (out[numerator[1]] !== '{') break;
+      const denominator = takeGroup(out, numerator[1]);
+      if (!denominator) break;
+      const num = expandFractions(numerator[0]);
+      const den = expandFractions(denominator[0]);
+      // "0.693/k" reads better than "(0.693)/(k)"; the brackets earn their place only
+      // when a part contains a space or a loose operator.
+      const wrap = part => (/[\s+×÷±≤≥≠≈]/.test(part) ? `(${part})` : part);
+      const replacement = FRACTIONS[`${numerator[0]}/${denominator[0]}`] || `${wrap(num)}/${wrap(den)}`;
+      out = out.slice(0, match.index) + replacement + out.slice(denominator[1]);
+    }
+    return out;
+  }
+
+  /* \sqrt{…}, \text{…} … — one brace group each. */
+  function replaceWithGroup(text, command, convert) {
+    const finder = new RegExp('\\\\' + command + '\\s*');
+    let out = text;
+    for (let guard = 0; guard < 500; guard++) {
+      const match = finder.exec(out);
+      if (!match) return out;
+      const open = match.index + match[0].length;
+      if (out[open] !== '{') return out;
+      const group = takeGroup(out, open);
+      if (!group) return out;
+      out = out.slice(0, match.index) + convert(group[0]) + out.slice(group[1]);
+    }
+    return out;
+  }
+
+  /* A LaTeX fragment → readable text. */
+  function plainMath(latex) {
+    let out = String(latex == null ? '' : latex);
+    out = expandFractions(out);
+    out = replaceWithGroup(out, 'sqrt', body => `√(${plainMath(body)})`);
+    out = replaceWithGroup(out, '(?:text|mathrm|mathbf|mathit|textit|operatorname)', body => body);
+
+    // \times, \mu, \Delta … — a named symbol, or a Greek letter. A unit swallows the
+    // single space a command leaves behind when a letter follows ("\mu g" → "μg").
+    out = out.replace(/\\([A-Za-z]+)([ \t]?)/g, (match, name, space, offset, whole) => {
+      const unit = UNIT_SYMBOLS[name] || GREEK[name];
+      if (unit) {
+        const next = whole[offset + match.length];
+        return space && next && /[A-Za-z]/.test(next) ? unit : unit + space;
+      }
+      const operator = MATH_SYMBOLS[name];
+      return operator ? operator + space : match;   // "2 \times 3" keeps its space
+    });
+
+    // Sub- and superscripts: digits and signs become real characters, 1/2 becomes ½,
+    // anything wordy stays as _word / ^word.
+    out = out.replace(/([_^])\s*\{([^{}]*)\}/g, (_m, mark, body) => {
+      if (FRACTIONS[body]) return (mark === '_' ? '' : '^') + FRACTIONS[body];
+      const table = mark === '_' ? SUBSCRIPTS : SUPERSCRIPTS;
+      return body.length && !/[^0-9+\-n]/.test(body) ? mapChars(body, table) : mark + body;
+    });
+    out = out.replace(/([_^])([0-9+\-n]+)/g, (_m, mark, body) =>
+      mapChars(body, mark === '_' ? SUBSCRIPTS : SUPERSCRIPTS));
+
+    // Spacing and sizing commands carry no meaning in plain text.
+    out = out.replace(/\\(?:left|right|big|Big|bigg|Bigg|,|;|!|:|quad|qquad)\s*/g, ' ');
+    out = out.replace(/\\%/g, '%').replace(/\\&/g, '&').replace(/\\_/g, '_')
+             .replace(/\\\$/g, '$').replace(/\\#/g, '#').replace(/\\\{/g, '{').replace(/\\\}/g, '}');
+    out = out.replace(/\^\{?\\circ\}?/g, '°');
+    out = out.replace(/\{([^{}]*)\}/g, '$1');      // remaining braces are grouping
+    out = out.replace(/\\\s*/g, ' ');              // a line break inside a display formula
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  /* The whole answer → text: formulas converted, Markdown flattened. */
+  function plainTextFromMarkdown(markdown) {
+    let out = String(markdown == null ? '' : markdown);
+    // Formulas first, while their delimiters are still there to find.
+    out = out.replace(/\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$/g,
+                      (_m, a, b) => `\n${plainMath(a !== undefined ? a : b)}\n`);
+    out = out.replace(/\\\(([\s\S]*?)\\\)|\$([^\n$]*?)\$/g,
+                      (_m, a, b) => plainMath(a !== undefined ? a : b));
+    out = out.replace(/\\begin\{([A-Za-z*]+)\}([\s\S]*?)\\end\{\1\}/g,
+                      (_m, _env, body) => `\n${plainMath(body)}\n`);
+    // Then the Markdown furniture.
+    out = out.replace(/!\[[^\]]*\]\([^)]*\)/g, '');                    // images
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');          // links
+    out = out.replace(/^\s{0,3}#{1,6}\s*/gm, '');                      // headings
+    out = out.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1');
+    out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1$2');
+    out = out.replace(/^\s{0,3}>\s?/gm, '');                           // blockquotes
+    out = out.replace(/^\s{0,3}[-*+]\s+/gm, '• ');                     // bullets
+    out = out.replace(/`{1,3}([^`]*)`{1,3}/g, '$1');                   // code spans
+    out = out.replace(/^\s*-{3,}\s*$/gm, '');                          // horizontal rules
+    out = out.replace(/[ \t]+$/gm, '');
+    out = out.replace(/\n{3,}/g, '\n\n');
+    return out.trim();
   }
 
   /* Markdown + formulas → sanitised, typeset HTML. */
@@ -1232,6 +1387,13 @@
   });
 
   /* ── Copy result ────────────────────────────────────── */
+  $('copy-plain').addEventListener('click', () => {
+    if (!rawAnalysis) return;
+    navigator.clipboard.writeText(plainTextFromMarkdown(rawAnalysis))
+      .then(() => showToast('Copied as text — formulas converted for pasting.', 'info'))
+      .catch(() => showToast('Could not copy — select the text manually.', 'error'));
+  });
+
   $('copy-result').addEventListener('click', () => {
     if (!rawAnalysis) return;
     navigator.clipboard.writeText(rawAnalysis).then(() => showToast('Analysis copied to clipboard!', 'info'));
@@ -1591,6 +1753,7 @@
     }
 
     $('summary-body').innerHTML = html;
+    typesetMath($('summary-body'));   // a section heading can carry a formula
     document.querySelectorAll('input[name="summary-depth"]').forEach(input => {
       input.addEventListener('change', () => { summaryDepth = input.value; });
     });

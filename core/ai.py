@@ -35,7 +35,11 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
-JSON_REMINDER = "\n\nReturn ONLY valid JSON. No prose, no markdown fences."
+JSON_REMINDER = (
+    "\n\nReturn ONLY valid JSON. No prose, no markdown fences. "
+    "If a value contains a backslash (LaTeX), write it as a doubled backslash (\\\\) "
+    "so the JSON stays valid."
+)
 
 
 class CallOutcome:
@@ -74,11 +78,72 @@ class ProviderError(RuntimeError):
         self.body = body
 
 
+# LaTeX inside a JSON string is a trap: `\frac` is `\f` + "rac" (a form feed — valid JSON,
+# so it parses and silently corrupts), `\times` is a tab plus "imes", and `\(` is not a
+# legal JSON escape at all, so the whole object fails to parse and the section is thrown
+# away. The prompts ask for plain Unicode maths, but models slip, and a slip is invisible:
+# the student gets mangled notes instead of an error. These are the escape letters JSON
+# gives a meaning to, paired with the LaTeX commands that start with them — deliberately a
+# short list, because `\n` followed by a word is a legitimate newline and must be left alone.
+_AMBIGUOUS_LATEX_COMMANDS = {
+    "tan", "tanh", "tau", "text", "textbf", "textit", "textrm", "theta", "thickapprox",
+    "times", "tiny", "to", "top", "triangle", "triangledown", "triangleleft",
+    "triangleright", "nabla", "ne", "nearrow", "neg", "neq", "newline", "ni", "noindent",
+    "nonumber", "not", "notin", "nu", "nwarrow", "rangle", "rho", "right", "rightarrow",
+    "rightharpoonup", "Rightarrow", "rfloor", "rceil", "rvert", "renewcommand",
+    "beta", "bar", "because", "big", "bigcup", "bigcap", "binom", "boldsymbol", "bot",
+    "boxed", "bullet", "bumpeq", "frac", "forall",
+}
+
+
+def repair_latex_escapes(text: str) -> str:
+    r"""Double the backslashes of LaTeX a model left unescaped inside JSON.
+
+    Only sequences that cannot be intentional are touched:
+
+      * a backslash before anything JSON does not define as an escape (`\(`, `\[`, `\,` …)
+      * `\u` not followed by four hex digits (`\upsilon`, `\underbrace`)
+      * `\f`, `\b`, `\v` before a letter — a form feed is never meant mid-word
+      * `\t`, `\n`, `\r` only when the letters after them spell a known LaTeX command
+        (`\times`, `\nu`, `\theta` …), so a genuine `\n` before a word survives intact
+
+    Everything already valid — including the doubled backslashes this app writes itself
+    with `json.dumps` — is left exactly as it is.
+    """
+    if not text or "\\" not in text:
+        return text
+    repaired = 0
+
+    def double(match: "re.Match[str]") -> str:
+        nonlocal repaired
+        repaired += 1
+        return "\\" + match.group(0)
+
+    # 1. Not a JSON escape at all: \( \) \[ \] \{ \} \, \; \% \& \_ \# \~ \| ...
+    out = re.sub(r'(?<!\\)\\(?![\\/"bfnrtu])', double, text)
+    # 2. \u that is not a unicode escape.
+    out = re.sub(r'(?<!\\)\\u(?![0-9a-fA-F]{4})', double, out)
+    # 3. \f \b \v before a letter — never an intended control character in prose.
+    out = re.sub(r'(?<!\\)\\[fbv](?=[A-Za-z])', double, out)
+    # 4. \t \n \r, but only when the whole word is a known LaTeX command.
+    def maybe_double(match: "re.Match[str]") -> str:
+        nonlocal repaired
+        if match.group(0)[1:] in _AMBIGUOUS_LATEX_COMMANDS:
+            repaired += 1
+            return "\\" + match.group(0)
+        return match.group(0)
+
+    out = re.sub(r'(?<!\\)\\[tnr][A-Za-z]+', maybe_double, out)
+    if repaired:
+        logger.warning("Repaired %d unescaped LaTeX backslash(es) in model JSON", repaired)
+    return out
+
+
 def parse_json_lenient(raw: str) -> Optional[dict]:
     """Models sometimes wrap JSON in fences or add a sentence. Recover what we can."""
     if not raw:
         return None
-    text = raw.strip()
+    text = repair_latex_escapes(raw).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     try:
         value = json.loads(text)

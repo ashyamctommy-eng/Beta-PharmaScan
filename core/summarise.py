@@ -103,6 +103,10 @@ Rules, strictly:
 3. Prefer numbers, drug names, mechanisms and comparisons. Drop filler and repetition.
 4. If the text is unusable (empty, garbled, or a scanned image with no text), return
    {"usable": false, "reason": "brief reason"} and nothing else.
+5. Write every formula, unit or calculation as plain text with Unicode symbols — t½, ×, ÷,
+   ≤, ≥, Δ, μ, ₁ ₂ — and never in LaTeX. A backslash inside JSON is either invalid (so the
+   whole section is lost) or silently mangled (\\frac arrives as "rac"), and these notes are
+   read, copied and printed as plain text.
 Return ONLY JSON with this shape:
 {"usable": true,
  "bullets": [{"text": "...", "page": 12}],
@@ -121,7 +125,9 @@ Return ONLY JSON with this shape:
 Rules:
 - "remember_5": the 5 highest-value facts across the whole document, each at most 20 words.
 - "exam_traps": 1 to 3 confusions or mistakes students commonly make on this material.
-- Introduce no new facts: everything must be supported by the topics given."""
+- Introduce no new facts: everything must be supported by the topics given.
+- Write formulas and units as plain text with Unicode symbols (t½, ×, ÷, ≤, Δ, μ), never in
+  LaTeX — a backslash in JSON is either invalid or silently mangled."""
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
